@@ -8,8 +8,8 @@ OUTPUT_FILE = "annotations.csv"
 LABELS = {
     "1": "ADVICE",
     "2": "WARNING",
-    "3": "SUPPORT",
-    "4": "OPINION",
+    "3": "EMOTIONAL_SUPPORT",
+    "4": "ANECDOTE",
     "5": "APPRAISAL"
 }
 
@@ -44,8 +44,8 @@ with open(OUTPUT_FILE, "a", newline="", encoding="utf-8") as f:
 
         print("1 = ADVICE")
         print("2 = WARNING")
-        print("3 = SUPPORT")
-        print("4 = OPINION")
+        print("3 = EMOTIONAL_SUPPORT")
+        print("4 = ANECDOTE")
         print("5 = APPRAISAL")
 
         label = None
