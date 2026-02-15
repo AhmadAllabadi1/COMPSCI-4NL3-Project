@@ -12,6 +12,30 @@ random.seed(42)
 # total comments to extract
 TOTAL_NEEDED = 2000
 
+# patterns that indicate redirect/meta comments (excluded from dataset)
+REDIRECT_PATTERNS = [
+    "i am a bot",
+    "performed automatically",
+    "your comment has been removed",
+    "your post has been removed",
+    "your submission has been removed",
+    "what's your question",
+    "read the sidebar",
+    "r/legaladvice",
+    "/r/legaladvice",
+    "r/personalfinance",
+    "/r/personalfinance",
+]
+
+
+def is_redirect_or_meta(text: str) -> bool:
+    """Return True if the comment is a redirect, bot message, or meta-question."""
+    if not text or not isinstance(text, str):
+        return False
+    lower = text.lower()
+    return any(p in lower for p in REDIRECT_PATTERNS)
+
+
 # find all jsonl files in folder
 files = glob.glob(os.path.join("raw_data", "*.jsonl"))
 
@@ -27,6 +51,8 @@ for file in files:
             obj = json.loads(line)
             body = obj.get("body", obj.get("text", ""))
             if body in ("[removed]", "[deleted]"):
+                continue
+            if is_redirect_or_meta(body):
                 continue
             all_valid_lines.append(line)
         except Exception:
