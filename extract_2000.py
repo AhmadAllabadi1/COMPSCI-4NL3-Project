@@ -80,8 +80,21 @@ for line in sampled_lines:
     except Exception:
         continue
 
-# save final dataset
-with open("structured_data.json", "w", encoding="utf-8") as f:
-    json.dump(all_data, f, indent=2, ensure_ascii=False)
+# split into 4 files of 500 each
+OUTPUT_FILES = [
+    "ahmad_data.json",
+    "karam_data.json",
+    "rayan_data.json",
+    "aizaz_data.json",
+]
+CHUNK_SIZE = 500
 
-print("DONE. Created structured_data.json with", len(all_data), "instances.")
+for i, filename in enumerate(OUTPUT_FILES):
+    start = i * CHUNK_SIZE
+    end = start + CHUNK_SIZE
+    chunk = all_data[start:end]
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(chunk, f, indent=2, ensure_ascii=False)
+    print(f"Created {filename} with {len(chunk)} instances.")
+
+print("DONE. Created 4 files with 500 instances each.")

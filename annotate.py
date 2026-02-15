@@ -1,9 +1,24 @@
 import json
 import csv
 import os
+import sys
 
-DATA_FILE = "structured_data.json"
-OUTPUT_FILE = "annotations.csv"
+# accept filename as command-line argument or prompt for it
+if len(sys.argv) > 1:
+    DATA_FILE = sys.argv[1]
+else:
+    DATA_FILE = input("Enter data file to annotate (e.g. ahmad_data.json): ").strip()
+
+if not DATA_FILE:
+    print("No file specified. Exiting.")
+    sys.exit(1)
+
+# derive output file from input: ahmad_data.json -> ahmad_annotations.csv
+OUTPUT_FILE = DATA_FILE.replace("_data.json", "_annotations.csv")
+
+if not os.path.exists(DATA_FILE):
+    print(f"File not found: {DATA_FILE}")
+    sys.exit(1)
 
 LABELS = {
     "1": "ADVICE",
