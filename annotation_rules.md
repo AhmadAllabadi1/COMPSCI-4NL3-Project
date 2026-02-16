@@ -5,8 +5,8 @@
 Each response message must be assigned **exactly ONE label** from the following five mutually exclusive categories:
 
 1. Practical / Actionable Advice
-2. Emotional Support
-3. Warnings or Cautions
+2. Warnings or Cautions
+3. Emotional Support
 4. Personal Opinions or Anecdotes
 5. Appraisal (evaluation, judgment, or validation)
 
@@ -47,7 +47,7 @@ If multiple categories appear, choose the label that represents the **primary pu
 
 Use this priority order when unclear:
 
-**Advice > Warning > Emotional Support > Appraisal > Personal Anecdote**
+**Advice > Warning > Emotional Support > Personal Anecdote > Appraisal**
 
 Reason: some categories are functionally stronger (they try to change behavior).
 
@@ -117,7 +117,38 @@ General encouragement without an action:
 
 ---
 
-## 2. Emotional Support
+## 2. Warnings or Cautions
+
+### Definition
+
+The speaker predicts **negative consequences** or alerts the reader to danger or risk.
+
+Purpose: **prevent harm**, not solve the problem.
+
+### Key Test
+
+Is the message mainly saying:
+**"Something bad may happen if you continue."**
+
+### Examples (POSITIVE)
+
+* "If you keep ignoring this, you could fail the course."
+* "Be careful — they might be manipulating you."
+* "That sounds like a scam."
+* "You could get in trouble for that."
+
+### Important Distinction
+
+Warning ≠ Advice
+
+| Message                                       | Label   |
+| --------------------------------------------- | ------- |
+| "You should leave that job."                  | Advice  |
+| "If you stay, they will keep exploiting you." | Warning |
+
+---
+
+## 3. Emotional Support
 
 ### Definition
 
@@ -152,37 +183,6 @@ If **no action is suggested**, it is Emotional Support even if it sounds helpful
 If action appears:
 
 > "I'm sorry. You should talk to HR." → Advice
-
----
-
-## 3. Warnings or Cautions
-
-### Definition
-
-The speaker predicts **negative consequences** or alerts the reader to danger or risk.
-
-Purpose: **prevent harm**, not solve the problem.
-
-### Key Test
-
-Is the message mainly saying:
-**"Something bad may happen if you continue."**
-
-### Examples (POSITIVE)
-
-* "If you keep ignoring this, you could fail the course."
-* "Be careful — they might be manipulating you."
-* "That sounds like a scam."
-* "You could get in trouble for that."
-
-### Important Distinction
-
-Warning ≠ Advice
-
-| Message                                       | Label   |
-| --------------------------------------------- | ------- |
-| "You should leave that job."                  | Advice  |
-| "If you stay, they will keep exploiting you." | Warning |
 
 ---
 
@@ -263,11 +263,11 @@ Follow this order:
 3. Is it primarily comforting?
    → Emotional Support
 
-4. Is it judging/evaluating behavior?
-   → Appraisal
-
-5. Is it mainly about the speaker's story or belief?
+4. Is it mainly about the speaker's story or belief?
    → Personal Anecdote
+
+5. Is it judging/evaluating behavior?
+   → Appraisal
 
 ---
 
@@ -310,5 +310,5 @@ Annotate intended meaning, not literal wording.
 | Advice            | Change behavior           |
 | Warning           | Prevent harm              |
 | Emotional Support | Provide comfort           |
-| Appraisal         | Provide evaluation        |
 | Anecdote          | Share personal experience |
+| Appraisal         | Provide evaluation        |
