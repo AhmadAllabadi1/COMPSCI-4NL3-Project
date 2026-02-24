@@ -1,3 +1,14 @@
+"""
+Annotate Reddit comments with support/response labels.
+
+Usage:
+  python annotate.py <data_file>
+  python annotate.py ahmad_data.json
+
+Input:  JSON file with [{"id": N, "text": "..."}, ...]
+Output: CSV file (e.g. ahmad_data.json -> ahmad_annotations.csv)
+        Columns: id, text, label (ADVICE | WARNING | EMOTIONAL_SUPPORT | ANECDOTE | APPRAISAL)
+"""
 import json
 import csv
 import os
@@ -13,8 +24,12 @@ if not DATA_FILE:
     print("No file specified. Exiting.")
     sys.exit(1)
 
-# derive output file from input: ahmad_data.json -> ahmad_annotations.csv
-OUTPUT_FILE = DATA_FILE.replace("_data.json", "_annotations.csv")
+# derive output file from input
+if DATA_FILE.endswith("_data.json"):
+    OUTPUT_FILE = DATA_FILE.replace("_data.json", "_annotations.csv")
+else:
+    base = os.path.splitext(DATA_FILE)[0]
+    OUTPUT_FILE = base + "_annotations.csv"
 
 if not os.path.exists(DATA_FILE):
     print(f"File not found: {DATA_FILE}")
