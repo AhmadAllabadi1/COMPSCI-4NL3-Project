@@ -1,0 +1,26 @@
+Train Distribution (Total = 1400)
+                   Count  Percentage
+ground_truth                        
+ADVICE               585       41.79
+WARNING               88        6.29
+EMOTIONAL_SUPPORT     65        4.64
+ANECDOTE             316       22.57
+APPRAISAL            346       24.71
+
+Validation Distribution (Total = 300)
+                   Count  Percentage
+ground_truth                        
+ADVICE               125       41.67
+WARNING               19        6.33
+EMOTIONAL_SUPPORT     14        4.67
+ANECDOTE              68       22.67
+APPRAISAL             74       24.67
+
+Test Distribution (Total = 300)
+                   Count  Percentage
+ground_truth                        
+ADVICE               126       42.00
+WARNING               19        6.33
+EMOTIONAL_SUPPORT     14        4.67
+ANECDOTE              67       22.33
+APPRAISAL             74       24.67
