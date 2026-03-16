@@ -1,0 +1,17 @@
+Step 2 baseline summary
+Data file: merged_data.csv
+Text column: text
+Label column: label1
+Total labeled rows used: 2000
+Train/val split: 1600/400 (val_size=0.2)
+
+Best simple baseline by validation accuracy: majority_baseline
+- majority accuracy: 0.4225, macro_f1: 0.1188
+- random   accuracy: 0.2525, macro_f1: 0.1698
+
+Trained baseline (TF-IDF + Logistic Regression):
+- accuracy: 0.5650
+- macro_f1: 0.3339
+- weighted_f1: 0.5208
+
+Outperforms best simple baseline (accuracy): True
