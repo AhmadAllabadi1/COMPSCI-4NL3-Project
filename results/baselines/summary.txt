@@ -1,17 +1,17 @@
 Step 2 baseline summary
-Data file: merged_data.csv
+Data file: train=step_2/train.csv, test=step_2/test.csv
 Text column: text
 Label column: label1
-Total labeled rows used: 2000
-Train/val split: 1600/400 (val_size=0.2)
+Total labeled rows used: 1700
+Train/test split: 1400/300
 
 Best simple baseline by validation accuracy: majority_baseline
-- majority accuracy: 0.4225, macro_f1: 0.1188
-- random   accuracy: 0.2525, macro_f1: 0.1698
+- majority accuracy: 0.4233, macro_f1: 0.1190
+- random   accuracy: 0.3333, macro_f1: 0.2150
 
 Trained baseline (TF-IDF + Logistic Regression):
-- accuracy: 0.5650
-- macro_f1: 0.3339
-- weighted_f1: 0.5208
+- accuracy: 0.5900
+- macro_f1: 0.3448
+- weighted_f1: 0.5395
 
 Outperforms best simple baseline (accuracy): True

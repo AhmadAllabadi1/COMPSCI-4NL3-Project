@@ -36,10 +36,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Step 2 baselines: random/majority baselines and TF-IDF + logistic regression."
     )
-    parser.add_argument("--data", default="merged_data.csv", help="Path to labeled CSV file.")
+    parser.add_argument("--data", default=None, help="Path to labeled CSV file (will be split internally).")
+    parser.add_argument("--train", default=None, help="Path to pre-split train CSV.")
+    parser.add_argument("--val", default=None, help="Path to pre-split validation CSV (only used with --data).")
+    parser.add_argument("--test", default=None, help="Path to pre-split test CSV.")
     parser.add_argument("--text-col", default="text", help="Name of text column.")
     parser.add_argument("--label-col", default="label1", help="Name of label column.")
-    parser.add_argument("--val-size", type=float, default=0.2, help="Validation split size.")
+    parser.add_argument("--val-size", type=float, default=0.2, help="Validation split size (only used with --data).")
     parser.add_argument("--random-state", type=int, default=42, help="Random seed.")
     parser.add_argument(
         "--output-dir",
@@ -49,30 +52,44 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def load_split(path: str, text_col: str, label_col: str) -> tuple:
+    df = pd.read_csv(path)
+    missing = {text_col, label_col}.difference(df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns in {path}: {sorted(missing)}")
+    df = df[[text_col, label_col]].dropna(subset=[text_col, label_col]).copy()
+    df[text_col] = df[text_col].astype(str)
+    df[label_col] = df[label_col].map(normalize_label)
+    return df[text_col], df[label_col]
+
+
 def main() -> None:
     args = parse_args()
 
-    df = pd.read_csv(args.data)
-    required_cols = {args.text_col, args.label_col}
-    missing = required_cols.difference(df.columns)
-    if missing:
-        raise ValueError(f"Missing required columns: {sorted(missing)}")
+    if args.train and args.test:
+        X_train, y_train = load_split(args.train, args.text_col, args.label_col)
+        X_val, y_val = load_split(args.test, args.text_col, args.label_col)
+        data_source = f"train={args.train}, test={args.test}"
+    else:
+        data_file = args.data or "merged_data.csv"
+        df = pd.read_csv(data_file)
+        missing = {args.text_col, args.label_col}.difference(df.columns)
+        if missing:
+            raise ValueError(f"Missing required columns: {sorted(missing)}")
+        working = df[[args.text_col, args.label_col]].dropna(subset=[args.text_col, args.label_col]).copy()
+        working[args.text_col] = working[args.text_col].astype(str)
+        working[args.label_col] = working[args.label_col].map(normalize_label)
+        X_train, X_val, y_train, y_val = train_test_split(
+            working[args.text_col],
+            working[args.label_col],
+            test_size=args.val_size,
+            random_state=args.random_state,
+            stratify=working[args.label_col],
+        )
+        data_source = data_file
 
-    working = df[[args.text_col, args.label_col]].copy()
-    working = working.dropna(subset=[args.text_col, args.label_col])
-    working[args.text_col] = working[args.text_col].astype(str)
-    working[args.label_col] = working[args.label_col].map(normalize_label)
-
-    class_counts = working[args.label_col].value_counts().sort_index()
+    class_counts = y_train.value_counts().sort_index()
     class_distribution = (class_counts / class_counts.sum()).to_dict()
-
-    X_train, X_val, y_train, y_val = train_test_split(
-        working[args.text_col],
-        working[args.label_col],
-        test_size=args.val_size,
-        random_state=args.random_state,
-        stratify=working[args.label_col],
-    )
 
     majority_label = y_train.value_counts().idxmax()
     majority_preds = np.full(shape=len(y_val), fill_value=majority_label)
@@ -105,12 +122,12 @@ def main() -> None:
 
     metrics_payload = {
         "config": {
-            "data": args.data,
+            "data": data_source,
             "text_col": args.text_col,
             "label_col": args.label_col,
             "val_size": args.val_size,
             "random_state": args.random_state,
-            "n_total": int(len(working)),
+            "n_total": int(len(X_train)) + int(len(X_val)),
             "n_train": int(len(X_train)),
             "n_val": int(len(X_val)),
         },
@@ -136,11 +153,11 @@ def main() -> None:
 
     summary_lines = [
         "Step 2 baseline summary",
-        f"Data file: {args.data}",
+        f"Data file: {data_source}",
         f"Text column: {args.text_col}",
         f"Label column: {args.label_col}",
-        f"Total labeled rows used: {len(working)}",
-        f"Train/val split: {len(X_train)}/{len(X_val)} (val_size={args.val_size})",
+        f"Total labeled rows used: {len(X_train) + len(X_val)}",
+        f"Train/test split: {len(X_train)}/{len(X_val)}",
         "",
         f"Best simple baseline by validation accuracy: {best_simple_name}",
         f"- majority accuracy: {majority_metrics['accuracy']:.4f}, macro_f1: {majority_metrics['macro_f1']:.4f}",
