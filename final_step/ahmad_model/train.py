@@ -371,6 +371,8 @@ def run_experiment(
     train_dataset: Dataset,
     val_dataset: Dataset,
     val_texts: list,
+    test_dataset: Dataset,
+    test_texts: list,
     trainer_cls,
     trainer_extra_kwargs: dict,
     num_epochs: int = 4,
@@ -382,7 +384,7 @@ def run_experiment(
     print(f"\n{'='*60}")
     print(f"  Run: {run_tag}")
     print(f"  Model: {MODEL_NAME}")
-    print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}")
+    print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
     print(f"  Epochs: {num_epochs}, LR: {learning_rate}, Batch: {batch_size}")
     print(f"{'='*60}\n")
 
@@ -457,27 +459,58 @@ def run_experiment(
                      f"Loss Curves — {run_tag}")
 
     save_misclassified(val_texts, true_ids, pred_ids,
-                       DIAGRAM_DIR / f"{prefix}_misclassified.csv")
+                       DIAGRAM_DIR / f"{prefix}_val_misclassified.csv")
 
-    metrics = {
+    val_metrics = {
         "accuracy": accuracy_score(true_ids, pred_ids),
         "f1_macro": f1_score(true_ids, pred_ids, average="macro", zero_division=0),
         "f1_weighted": f1_score(true_ids, pred_ids, average="weighted", zero_division=0),
         "precision_macro": precision_score(true_ids, pred_ids, average="macro", zero_division=0),
         "recall_macro": recall_score(true_ids, pred_ids, average="macro", zero_division=0),
     }
-    metrics_path = DIAGRAM_DIR / f"{prefix}_metrics.json"
-    metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
-    print(f"  Saved: {metrics_path}")
+    val_metrics_path = DIAGRAM_DIR / f"{prefix}_val_metrics.json"
+    val_metrics_path.write_text(json.dumps(val_metrics, indent=2), encoding="utf-8")
+    print(f"  Saved: {val_metrics_path}")
+
+    # --- Test set evaluation (final results) ---
+    print(f"\n  Evaluating on TEST set...")
+    test_predictions = trainer.predict(test_dataset)
+    test_pred_ids = np.argmax(test_predictions.predictions, axis=-1)
+    test_true_ids = np.array(test_dataset["label"])
+
+    plot_confusion_matrix(test_true_ids, test_pred_ids,
+                          DIAGRAM_DIR / f"{prefix}_test_confusion_matrix.png",
+                          f"Test Confusion Matrix — {run_tag}")
+
+    test_report = save_classification_report_file(test_true_ids, test_pred_ids,
+                                                  DIAGRAM_DIR / f"{prefix}_test_classification_report.txt")
+    print(f"\n  TEST Classification Report ({run_tag}):\n{test_report}")
+
+    save_misclassified(test_texts, test_true_ids, test_pred_ids,
+                       DIAGRAM_DIR / f"{prefix}_test_misclassified.csv")
+
+    test_metrics = {
+        "accuracy": accuracy_score(test_true_ids, test_pred_ids),
+        "f1_macro": f1_score(test_true_ids, test_pred_ids, average="macro", zero_division=0),
+        "f1_weighted": f1_score(test_true_ids, test_pred_ids, average="weighted", zero_division=0),
+        "precision_macro": precision_score(test_true_ids, test_pred_ids, average="macro", zero_division=0),
+        "recall_macro": recall_score(test_true_ids, test_pred_ids, average="macro", zero_division=0),
+    }
+    test_metrics_path = DIAGRAM_DIR / f"{prefix}_test_metrics.json"
+    test_metrics_path.write_text(json.dumps(test_metrics, indent=2), encoding="utf-8")
+    print(f"  Saved: {test_metrics_path}")
 
     # Save best model
     trainer.save_model(str(output_dir / "best_model"))
     print(f"  Model saved to: {output_dir / 'best_model'}")
 
     return {
-        "metrics": metrics,
-        "predictions": pred_ids,
-        "true_labels": true_ids,
+        "val_metrics": val_metrics,
+        "test_metrics": test_metrics,
+        "val_predictions": pred_ids,
+        "val_true_labels": true_ids,
+        "test_predictions": test_pred_ids,
+        "test_true_labels": test_true_ids,
     }
 
 
@@ -507,7 +540,7 @@ def main():
     print("=" * 60)
     train_df = load_data(TRAIN_CSV, has_labels=True)
     val_df = load_data(VAL_CSV, has_labels=True)
-    test_df = load_data(TEST_CSV, has_labels=False)
+    test_df = load_data(TEST_CSV, has_labels=True)
     print(f"  Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
 
     # Label distributions
@@ -517,9 +550,11 @@ def main():
     print("\nLoading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
-    # Shared validation set
+    # Shared validation and test sets
     val_dataset = df_to_dataset(val_df, tokenizer, has_labels=True)
     val_texts = val_df["text"].tolist()
+    test_dataset = df_to_dataset(test_df, tokenizer, has_labels=True)
+    test_texts = test_df["text"].tolist()
 
     # Class weights
     train_label_ids = [LABEL2ID[l] for l in train_df["label"]]
@@ -540,6 +575,8 @@ def main():
             train_dataset=train_dataset,
             val_dataset=val_dataset,
             val_texts=val_texts,
+            test_dataset=test_dataset,
+            test_texts=test_texts,
             trainer_cls=WeightedCETrainer,
             trainer_extra_kwargs={"class_weights": class_weights},
             num_epochs=args.epochs,
@@ -557,6 +594,8 @@ def main():
             train_dataset=train_dataset,
             val_dataset=val_dataset,
             val_texts=val_texts,
+            test_dataset=test_dataset,
+            test_texts=test_texts,
             trainer_cls=FocalTrainer,
             trainer_extra_kwargs={"focal_loss": focal},
             num_epochs=args.epochs,
@@ -593,6 +632,8 @@ def main():
             train_dataset=aug_dataset,
             val_dataset=val_dataset,
             val_texts=val_texts,
+            test_dataset=test_dataset,
+            test_texts=test_texts,
             trainer_cls=FocalTrainer,
             trainer_extra_kwargs={"focal_loss": focal_aug},
             num_epochs=args.epochs,
@@ -630,6 +671,8 @@ def main():
             train_dataset=aug_dataset,
             val_dataset=val_dataset,
             val_texts=val_texts,
+            test_dataset=test_dataset,
+            test_texts=test_texts,
             trainer_cls=WeightedCETrainer,
             trainer_extra_kwargs={"class_weights": aug_weights},
             num_epochs=args.epochs,
@@ -645,10 +688,10 @@ def main():
     if "Weighted CE" in all_results and "Focal Loss" in all_results:
         print("\n  Generating loss function ablation...")
         plot_ablation(
-            all_results["Weighted CE"]["metrics"],
-            all_results["Focal Loss"]["metrics"],
+            all_results["Weighted CE"]["test_metrics"],
+            all_results["Focal Loss"]["test_metrics"],
             "Weighted CE", "Focal Loss",
-            "Ablation: Loss Function (Weighted CE vs Focal Loss)",
+            "Ablation: Loss Function — Weighted CE vs Focal Loss (Test Set)",
             DIAGRAM_DIR / "ablation_loss_function.png",
         )
 
@@ -656,10 +699,10 @@ def main():
     if "Focal Loss" in all_results and "Focal Loss + EDA" in all_results:
         print("\n  Generating Focal Loss augmentation ablation...")
         plot_ablation(
-            all_results["Focal Loss"]["metrics"],
-            all_results["Focal Loss + EDA"]["metrics"],
+            all_results["Focal Loss"]["test_metrics"],
+            all_results["Focal Loss + EDA"]["test_metrics"],
             "No Augmentation", "With EDA",
-            "Ablation: Augmentation with Focal Loss",
+            "Ablation: Augmentation with Focal Loss (Test Set)",
             DIAGRAM_DIR / "ablation_augmentation_focal.png",
         )
 
@@ -667,35 +710,54 @@ def main():
     if "Weighted CE" in all_results and "Weighted CE + EDA" in all_results:
         print("\n  Generating Weighted CE augmentation ablation...")
         plot_ablation(
-            all_results["Weighted CE"]["metrics"],
-            all_results["Weighted CE + EDA"]["metrics"],
+            all_results["Weighted CE"]["test_metrics"],
+            all_results["Weighted CE + EDA"]["test_metrics"],
             "No Augmentation", "With EDA",
-            "Ablation: Augmentation with Weighted CE",
+            "Ablation: Augmentation with Weighted CE (Test Set)",
             DIAGRAM_DIR / "ablation_augmentation_wce.png",
         )
 
     # ------------------------------------------------------------------
-    # Overall comparison (all runs)
+    # Overall comparison (all runs) — using TEST metrics
     # ------------------------------------------------------------------
     if len(all_results) >= 2:
-        plot_all_runs_comparison(all_results, DIAGRAM_DIR / "all_runs_comparison.png")
-        plot_per_class_f1_comparison(all_results, DIAGRAM_DIR / "per_class_f1_comparison.png")
+        # Temporarily swap in test_metrics for the comparison plots
+        test_results = {k: {"metrics": v["test_metrics"],
+                            "predictions": v["test_predictions"],
+                            "true_labels": v["test_true_labels"]}
+                        for k, v in all_results.items()}
+        plot_all_runs_comparison(test_results, DIAGRAM_DIR / "all_runs_comparison.png")
+        plot_per_class_f1_comparison(test_results, DIAGRAM_DIR / "per_class_f1_comparison.png")
 
     # ------------------------------------------------------------------
-    # Summary table
+    # Summary tables (both val and test)
     # ------------------------------------------------------------------
     if all_results:
-        rows = []
+        # Validation summary
+        val_rows = []
         for label, res in all_results.items():
             row = {"Run": label}
-            row.update(res["metrics"])
-            rows.append(row)
-        summary = pd.DataFrame(rows)
-        summary_path = DIAGRAM_DIR / "summary.csv"
-        summary.to_csv(summary_path, index=False)
-        print(f"\n  Saved: {summary_path}")
-        print("\n  Final Summary:")
-        print("  " + summary.to_string(index=False).replace("\n", "\n  "))
+            row.update(res["val_metrics"])
+            val_rows.append(row)
+        val_summary = pd.DataFrame(val_rows)
+        val_summary_path = DIAGRAM_DIR / "val_summary.csv"
+        val_summary.to_csv(val_summary_path, index=False)
+        print(f"\n  Saved: {val_summary_path}")
+        print("\n  Validation Summary:")
+        print("  " + val_summary.to_string(index=False).replace("\n", "\n  "))
+
+        # Test summary (FINAL RESULTS)
+        test_rows = []
+        for label, res in all_results.items():
+            row = {"Run": label}
+            row.update(res["test_metrics"])
+            test_rows.append(row)
+        test_summary = pd.DataFrame(test_rows)
+        test_summary_path = DIAGRAM_DIR / "test_summary.csv"
+        test_summary.to_csv(test_summary_path, index=False)
+        print(f"\n  Saved: {test_summary_path}")
+        print("\n  TEST Summary (Final Results):")
+        print("  " + test_summary.to_string(index=False).replace("\n", "\n  "))
 
     print("\n" + "=" * 60)
     print("  All done! Check diagrams/ for all outputs.")
