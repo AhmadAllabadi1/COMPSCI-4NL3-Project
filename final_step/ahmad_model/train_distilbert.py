@@ -44,7 +44,7 @@ matplotlib.use("Agg")  # non-interactive backend
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from eda_augment import augment_dataset
+from eda_augment import augment_dataset, augment_minority_classes
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -221,6 +221,42 @@ def save_misclassified(texts, y_true, y_pred, label_names, save_path: Path,
 
 
 # ---------------------------------------------------------------------------
+# Custom Trainer with class-weighted loss
+# ---------------------------------------------------------------------------
+class WeightedTrainer(Trainer):
+    """Trainer that applies class weights to the cross-entropy loss."""
+
+    def __init__(self, class_weights=None, **kwargs):
+        super().__init__(**kwargs)
+        if class_weights is not None:
+            self.class_weights = class_weights.to(self.args.device)
+        else:
+            self.class_weights = None
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        labels = inputs.pop("labels")
+        outputs = model(**inputs)
+        logits = outputs.logits
+        if self.class_weights is not None:
+            loss = torch.nn.functional.cross_entropy(logits, labels, weight=self.class_weights)
+        else:
+            loss = torch.nn.functional.cross_entropy(logits, labels)
+        return (loss, outputs) if return_outputs else loss
+
+
+def compute_class_weights(labels: list) -> torch.Tensor:
+    """Compute inverse-frequency class weights, normalized so they sum to num_classes."""
+    from collections import Counter
+    counts = Counter(labels)
+    total = sum(counts.values())
+    num_classes = len(counts)
+    weights = torch.zeros(num_classes)
+    for label_id, count in counts.items():
+        weights[label_id] = total / (num_classes * count)
+    return weights
+
+
+# ---------------------------------------------------------------------------
 # Training function
 # ---------------------------------------------------------------------------
 def train_and_evaluate(
@@ -233,6 +269,7 @@ def train_and_evaluate(
     num_epochs: int = 4,
     learning_rate: float = 2e-5,
     batch_size: int = 8,
+    class_weights: torch.Tensor = None,
 ) -> dict:
     """
     Fine-tune DistilBERT and evaluate on the validation set.
@@ -274,7 +311,8 @@ def train_and_evaluate(
         logging_dir=str(output_dir / "logs"),
     )
 
-    trainer = Trainer(
+    trainer = WeightedTrainer(
+        class_weights=class_weights,
         model=model,
         args=training_args,
         train_dataset=train_dataset,
@@ -441,10 +479,17 @@ def main():
     val_dataset = df_to_dataset(val_df, tokenizer, has_labels=True)
     val_texts = val_df["text"].tolist()
 
+    # ------------------------------------------------------------------
+    # Compute class weights from training labels
+    # ------------------------------------------------------------------
+    train_label_ids = [LABEL2ID[l] for l in train_df["label"]]
+    weights = compute_class_weights(train_label_ids)
+    print(f"\n  Class weights: {dict(zip(LABEL_LIST, weights.tolist()))}")
+
     results = {}
 
     # ------------------------------------------------------------------
-    # Run 1: Without augmentation
+    # Run 1: Without augmentation (with class-weighted loss)
     # ------------------------------------------------------------------
     if run_no_aug:
         train_dataset_no_aug = df_to_dataset(train_df, tokenizer, has_labels=True)
@@ -458,27 +503,37 @@ def main():
             num_epochs=args.epochs,
             learning_rate=args.lr,
             batch_size=args.batch_size,
+            class_weights=weights,
         )
 
     # ------------------------------------------------------------------
-    # Run 2: With EDA augmentation
+    # Run 2: With targeted EDA augmentation (minority classes only)
     # ------------------------------------------------------------------
     if run_aug:
-        print(f"\nApplying EDA augmentation (num_aug={args.num_aug}, alpha={args.eda_alpha})...")
-        aug_texts, aug_labels = augment_dataset(
+        print(f"\nApplying targeted EDA augmentation (minority classes only, alpha={args.eda_alpha})...")
+        aug_texts, aug_labels = augment_minority_classes(
             train_df["text"].tolist(),
             train_df["label"].tolist(),
-            num_aug=args.num_aug,
+            target_count=None,  # match the largest class
             alpha=args.eda_alpha,
         )
         # Combine original + augmented
         combined_texts = train_df["text"].tolist() + aug_texts
         combined_labels = train_df["label"].tolist() + aug_labels
-        print(f"  Original: {len(train_df)}, Augmented: {len(aug_texts)}, "
+        print(f"  Original: {len(train_df)}, Augmented (minority only): {len(aug_texts)}, "
               f"Combined: {len(combined_texts)}")
+
+        # Show new class distribution
+        from collections import Counter
+        new_dist = Counter(combined_labels)
+        print(f"  New distribution: {dict(sorted(new_dist.items()))}")
 
         aug_df = pd.DataFrame({"text": combined_texts, "label": combined_labels})
         train_dataset_aug = df_to_dataset(aug_df, tokenizer, has_labels=True)
+
+        # Recompute weights for the augmented dataset
+        aug_label_ids = [LABEL2ID[l] for l in combined_labels]
+        aug_weights = compute_class_weights(aug_label_ids)
 
         results["aug"] = train_and_evaluate(
             train_dataset=train_dataset_aug,
@@ -490,6 +545,7 @@ def main():
             num_epochs=args.epochs,
             learning_rate=args.lr,
             batch_size=args.batch_size,
+            class_weights=aug_weights,
         )
 
     # ------------------------------------------------------------------

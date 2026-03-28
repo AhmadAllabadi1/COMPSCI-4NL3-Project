@@ -206,3 +206,62 @@ def augment_dataset(
             aug_texts.append(aug_text)
             aug_labels.append(label)
     return aug_texts, aug_labels
+
+
+def augment_minority_classes(
+    texts: List[str],
+    labels: List[str],
+    target_count: Optional[int] = None,
+    alpha: float = 0.1,
+) -> tuple:
+    """
+    Oversample minority classes via EDA until each class reaches target_count.
+    Majority classes are left untouched. Returns ONLY the new augmented examples.
+
+    Args:
+        texts: List of original text strings.
+        labels: Corresponding labels.
+        target_count: Target sample count per class. Defaults to the count of
+                      the largest class.
+        alpha: EDA intensity parameter.
+
+    Returns:
+        Tuple of (new_texts, new_labels).
+    """
+    from collections import Counter
+
+    class_counts = Counter(labels)
+    if target_count is None:
+        target_count = max(class_counts.values())
+
+    # Group texts by label
+    class_texts: dict[str, List[str]] = {}
+    for text, label in zip(texts, labels):
+        class_texts.setdefault(label, []).append(text)
+
+    aug_texts = []
+    aug_labels = []
+
+    for label, count in class_counts.items():
+        if count >= target_count:
+            continue  # skip majority classes
+
+        needed = target_count - count
+        source = class_texts[label]
+        # How many augmented versions per original to get close to needed
+        num_aug_per = max(1, needed // count + 1)
+
+        generated = 0
+        for text in source:
+            if generated >= needed:
+                break
+            augmented = eda(text, alpha_sr=alpha, alpha_ri=alpha, alpha_rs=alpha,
+                            p_rd=alpha, num_aug=num_aug_per)
+            for aug_text in augmented:
+                if generated >= needed:
+                    break
+                aug_texts.append(aug_text)
+                aug_labels.append(label)
+                generated += 1
+
+    return aug_texts, aug_labels
