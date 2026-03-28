@@ -251,7 +251,7 @@ def train_and_evaluate(
         num_labels=NUM_LABELS,
         id2label=ID2LABEL,
         label2id=LABEL2ID,
-        classifier_dropout=0.3,  # dropout on classification head
+        seq_classif_dropout=0.3,  # dropout on classification head
     )
 
     training_args = TrainingArguments(
