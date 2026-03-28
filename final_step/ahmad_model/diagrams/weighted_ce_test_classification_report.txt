@@ -1,0 +1,11 @@
+                   precision    recall  f1-score   support
+
+           ADVICE       0.78      0.71      0.74       126
+         ANECDOTE       0.61      0.72      0.66        67
+        APPRAISAL       0.58      0.66      0.62        74
+EMOTIONAL_SUPPORT       0.17      0.07      0.10        14
+          WARNING       0.44      0.37      0.40        19
+
+         accuracy                           0.65       300
+        macro avg       0.51      0.50      0.50       300
+     weighted avg       0.64      0.65      0.64       300
