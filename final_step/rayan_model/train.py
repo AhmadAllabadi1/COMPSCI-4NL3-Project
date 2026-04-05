@@ -1,20 +1,25 @@
 """
 Rayan Nasrallah — COMPSCI 4NL3 Final Project
-Model: Bidirectional LSTM (BiLSTM) with GloVe pretrained embeddings
+Model: BiLSTM classifier on top of frozen Flair pretrained character BiLSTM embeddings
 Task: 5-class Reddit comment classification
       (ADVICE, ANECDOTE, APPRAISAL, EMOTIONAL_SUPPORT, WARNING)
 
 Architecture:
-  - Word-level vocabulary built from training data
-  - 100-dim GloVe embeddings (glove-wiki-gigaword-100) used as pretrained init
-  - Embeddings are fine-tuned during training
-  - 2-layer Bidirectional LSTM (hidden=256, output dim=512)
-  - Run 3 adds a soft attention layer over all LSTM hidden states
+  Flair 'news-forward-fast' is a character-level Bidirectional LSTM language model
+  pretrained on a large English news corpus (NOT a transformer). It produces
+  1024-dim contextual token embeddings where each word's representation depends
+  on all surrounding characters and words in the full sentence.
+
+  These Flair BiLSTM embeddings are frozen (not updated). A small task-specific
+  BiLSTM classifier is trained on top:
+    Flair character BiLSTM (frozen, pretrained, 1024-dim output per token)
+      -> Task BiLSTM (hidden=256, bidirectional -> 512-dim)
+      -> Dropout -> Linear(512, 5)
 
 3 Ablation Runs:
-  Run 1: BiLSTM + GloVe + Weighted CE                    (base)
-  Run 2: BiLSTM + GloVe + Weighted CE + EDA              (+ augmentation)
-  Run 3: BiLSTM + GloVe + Attention + Weighted CE        (+ attention)
+  Run 1: Flair features + BiLSTM classifier + Weighted CE         (base)
+  Run 2: Flair features + BiLSTM classifier + EDA + Weighted CE  (+ augmentation)
+  Run 3: Flair features + BiLSTM + Attention + Weighted CE       (+ attention)
 
 Outputs (all saved to rayan_model/diagrams/):
   - label_distribution.png
@@ -30,10 +35,10 @@ Outputs (all saved to rayan_model/diagrams/):
   - best_submission.zip          <-- final CodaBench submission
 
 Setup (run once on the VM):
-  pip install torch scikit-learn matplotlib seaborn nltk pandas numpy gensim
+  pip install torch scikit-learn matplotlib seaborn nltk pandas numpy flair
   python -c "import nltk; nltk.download('wordnet'); nltk.download('stopwords'); nltk.download('omw-1.4')"
 
-  GloVe vectors (~128MB) are downloaded automatically on first run via gensim.
+  Flair model (~74MB) downloads automatically on first run.
 
 Run:
   cd final_step/
@@ -41,8 +46,6 @@ Run:
 """
 
 import os
-import re
-import sys
 import json
 import random
 import zipfile
@@ -51,11 +54,9 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from collections import Counter
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 from sklearn.metrics import (
@@ -71,38 +72,34 @@ from sklearn.utils.class_weight import compute_class_weight
 import nltk
 from nltk.corpus import wordnet, stopwords
 
-import gensim.downloader as gensim_api
+from flair.embeddings import FlairEmbeddings
+from flair.data import Sentence
 
 warnings.filterwarnings("ignore")
 
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
-SEED           = 42
-MAX_LEN        = 128        # max tokens per sequence (word-level)
-VOCAB_MIN_FREQ = 1          # include all words seen in training (GloVe covers them)
-EMBED_DIM      = 100        # must match GloVe model dimension
-HIDDEN_DIM     = 256        # LSTM hidden size per direction (512 after bidir concat)
-NUM_LAYERS     = 2
-DROPOUT        = 0.4
-BATCH_SIZE     = 64
-EPOCHS         = 25
-LR             = 5e-4
-WEIGHT_DECAY   = 1e-4
-PATIENCE       = 4
-DEVICE         = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-GLOVE_MODEL_NAME = "glove-wiki-gigaword-100"   # ~128MB, cached by gensim after first download
+SEED          = 42
+MAX_LEN       = 64        # tokens per sequence (Flair tokenizes internally)
+FLAIR_DIM     = 1024      # news-forward-fast output dimension
+HIDDEN_DIM    = 256       # task BiLSTM hidden per direction (512 after concat)
+NUM_LAYERS    = 1
+DROPOUT       = 0.5
+BATCH_SIZE    = 32
+EPOCHS        = 30
+LR            = 1e-3
+WEIGHT_DECAY  = 1e-4
+PATIENCE      = 5
+EXTRACT_BATCH = 64        # sentences per Flair forward pass
+DEVICE        = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 LABELS     = ["ADVICE", "ANECDOTE", "APPRAISAL", "EMOTIONAL_SUPPORT", "WARNING"]
 LABEL2ID   = {l: i for i, l in enumerate(LABELS)}
 ID2LABEL   = {i: l for i, l in enumerate(LABELS)}
 NUM_LABELS = len(LABELS)
 
-PAD_TOKEN = "<PAD>"
-UNK_TOKEN = "<UNK>"
-
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # final_step/
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diagrams")
 os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -115,7 +112,7 @@ def set_seed(seed=SEED):
 
 set_seed()
 print(f"Device : {DEVICE}")
-print(f"Model  : BiLSTM + GloVe-100d (hidden={HIDDEN_DIM}, layers={NUM_LAYERS})")
+print(f"Model  : Flair BiLSTM (frozen, {FLAIR_DIM}d) -> task BiLSTM (hidden={HIDDEN_DIM})")
 
 
 # ─────────────────────────────────────────────
@@ -136,9 +133,9 @@ def get_synonyms(word):
 
 def synonym_replacement(words, n):
     new_words = words.copy()
-    non_stop  = [w for w in words if w.lower() not in STOP_WORDS]
+    non_stop = [w for w in words if w.lower() not in STOP_WORDS]
     random.shuffle(non_stop)
-    replaced  = 0
+    replaced = 0
     for word in non_stop:
         syns = get_synonyms(word)
         if syns:
@@ -177,8 +174,8 @@ def random_deletion(words, p):
 
 
 def eda(sentence, alpha=0.1, num_aug=1):
-    words     = sentence.split()
-    n         = max(1, int(alpha * len(words)))
+    words = sentence.split()
+    n = max(1, int(alpha * len(words)))
     augmented = []
     for _ in range(num_aug):
         op = random.choice(["sr", "ri", "rs", "rd"])
@@ -222,124 +219,115 @@ def load_split(filename):
 
 
 # ─────────────────────────────────────────────
-# VOCABULARY
+# FLAIR EMBEDDING EXTRACTION
 # ─────────────────────────────────────────────
-def simple_tokenize(text):
-    return re.findall(r"\b\w+\b", text.lower())
-
-
-def build_vocab(texts, min_freq=VOCAB_MIN_FREQ):
-    counter = Counter()
-    for text in texts:
-        counter.update(simple_tokenize(text))
-    vocab = {PAD_TOKEN: 0, UNK_TOKEN: 1}
-    for word, freq in counter.most_common():
-        if freq >= min_freq:
-            vocab[word] = len(vocab)
-    return vocab
-
-
-# ─────────────────────────────────────────────
-# GLOVE EMBEDDING MATRIX
-# ─────────────────────────────────────────────
-def load_glove():
-    """Download (first run only) and return the gensim GloVe KeyedVectors."""
-    print(f"  Loading GloVe '{GLOVE_MODEL_NAME}' via gensim (~128MB, cached after first run)...")
-    glove = gensim_api.load(GLOVE_MODEL_NAME)
-    print(f"  GloVe loaded: {len(glove)} vectors, {glove.vector_size}d")
-    return glove
-
-
-def build_embedding_matrix(vocab, glove):
+def load_flair_model():
     """
-    Build an embedding matrix of shape (vocab_size, EMBED_DIM).
-    Words found in GloVe use their pretrained vectors.
-    Words not found are initialized with small random uniform values.
-    The PAD token (index 0) is always a zero vector.
+    Load Flair 'news-forward-fast': a character-level BiLSTM language model
+    pretrained on English news text. ~74MB, cached after first download.
+    Output: 1024-dim contextual embedding per token.
     """
-    vocab_size = len(vocab)
-    # random init for unknown words
-    matrix = np.random.uniform(-0.1, 0.1, (vocab_size, EMBED_DIM)).astype(np.float32)
-    matrix[0] = 0.0   # PAD = zero vector
+    print("  Loading Flair 'news-forward-fast' pretrained BiLSTM (~74MB first run)...")
+    model = FlairEmbeddings("news-forward-fast")
+    print("  Flair model ready.")
+    return model
 
-    found = 0
-    for word, idx in vocab.items():
-        if word in glove:
-            matrix[idx] = glove[word]
-            found += 1
 
-    coverage = 100.0 * found / max(vocab_size, 1)
-    print(f"  GloVe coverage: {found}/{vocab_size} vocab tokens ({coverage:.1f}%)")
-    return torch.tensor(matrix, dtype=torch.float)
+def extract_embeddings(texts, flair_model, desc=""):
+    """
+    Pass texts through the frozen Flair BiLSTM to get contextual token embeddings.
+    Returns:
+      embeddings : (N, MAX_LEN, FLAIR_DIM) float32 CPU tensor
+      lengths    : (N,) int64 CPU tensor
+    """
+    all_embs = []
+    all_lens = []
+    n = len(texts)
+
+    for i in range(0, n, EXTRACT_BATCH):
+        batch_texts = texts[i: i + EXTRACT_BATCH]
+        sentences   = [Sentence(t if t.strip() else "empty") for t in batch_texts]
+
+        # Truncate long sentences before embedding to save time and memory
+        for sent in sentences:
+            if len(sent) > MAX_LEN:
+                sent.tokens = sent.tokens[:MAX_LEN]
+
+        flair_model.embed(sentences)
+
+        for sent in sentences:
+            tok_embs = torch.stack([tok.embedding.detach().cpu() for tok in sent])
+            n_tok    = tok_embs.shape[0]
+            length   = max(min(n_tok, MAX_LEN), 1)
+
+            if n_tok < MAX_LEN:
+                pad      = torch.zeros(MAX_LEN - n_tok, FLAIR_DIM)
+                tok_embs = torch.cat([tok_embs, pad], dim=0)
+            else:
+                tok_embs = tok_embs[:MAX_LEN]
+
+            all_embs.append(tok_embs)
+            all_lens.append(length)
+
+            # Free GPU/CPU memory held by Flair token embeddings
+            for tok in sent:
+                tok.clear_embeddings()
+
+        done = min(i + EXTRACT_BATCH, n)
+        if done % 128 == 0 or done == n:
+            print(f"    [{desc}] {done}/{n} texts...")
+
+    return torch.stack(all_embs), torch.tensor(all_lens, dtype=torch.long)
 
 
 # ─────────────────────────────────────────────
 # DATASET
 # ─────────────────────────────────────────────
-class RedditDataset(Dataset):
-    def __init__(self, df, vocab, max_len=MAX_LEN):
-        self.texts   = df["text"].tolist()
-        self.labels  = [LABEL2ID[l] for l in df["label"].tolist()]
-        self.ids     = df["id"].tolist()   # keep original IDs for CodaBench submission
-        self.vocab   = vocab
-        self.max_len = max_len
-        self.pad_id  = vocab[PAD_TOKEN]
-        self.unk_id  = vocab[UNK_TOKEN]
+class EmbeddingDataset(Dataset):
+    """Dataset backed by pre-computed Flair embeddings."""
+
+    def __init__(self, embeddings, lengths, df):
+        self.embeddings = embeddings      # (N, MAX_LEN, FLAIR_DIM)
+        self.lengths    = lengths         # (N,)
+        self.labels     = [LABEL2ID[l] for l in df["label"].tolist()]
+        self.ids        = df["id"].tolist()
 
     def __len__(self):
-        return len(self.texts)
-
-    def encode(self, text):
-        tokens = simple_tokenize(text)[: self.max_len]
-        ids    = [self.vocab.get(t, self.unk_id) for t in tokens]
-        length = max(len(ids), 1)
-        ids    = ids + [self.pad_id] * (self.max_len - len(ids))
-        return ids, length
+        return len(self.labels)
 
     def __getitem__(self, idx):
-        ids, length = self.encode(self.texts[idx])
         return {
-            "input_ids": torch.tensor(ids,    dtype=torch.long),
-            "length":    torch.tensor(length, dtype=torch.long),
-            "label":     torch.tensor(self.labels[idx], dtype=torch.long),
-            "sample_id": self.ids[idx],
+            "embeddings": self.embeddings[idx],
+            "length":     self.lengths[idx],
+            "label":      torch.tensor(self.labels[idx], dtype=torch.long),
+            "sample_id":  self.ids[idx],
         }
 
 
 # ─────────────────────────────────────────────
-# MODEL — BiLSTM with GloVe init (optional attention)
+# MODEL
 # ─────────────────────────────────────────────
 class BiLSTMClassifier(nn.Module):
     """
-    2-layer Bidirectional LSTM for text classification.
+    Task BiLSTM trained on top of frozen Flair contextual embeddings.
 
-    Embedding layer is initialized from GloVe pretrained vectors and
-    fine-tuned during training. This provides meaningful starting
-    representations for words, unlike random initialization.
-
-    Without attention (Run 1 & 2):
-      The final hidden states of the top LSTM layer (forward + backward)
-      are concatenated and fed to the classifier.
+    Without attention (Runs 1 & 2):
+      Concatenate the final forward and backward hidden states of the LSTM
+      and feed to the linear classifier.
 
     With attention (Run 3):
-      A learned linear projection computes a scalar score over each
-      timestep's hidden state. A softmax turns scores into weights, and
-      the context vector is the weighted sum of all hidden states.
+      A learned linear projection scores every timestep. Softmax turns scores
+      into weights. The classification vector is the weighted sum of all hidden
+      states, letting the model focus on the most informative words.
     """
 
-    def __init__(self, vocab_size, embed_dim, hidden_dim, num_layers,
-                 num_classes, dropout, pretrained_embeddings=None,
-                 use_attention=False):
+    def __init__(self, input_dim, hidden_dim, num_layers, num_classes,
+                 dropout, use_attention=False):
         super().__init__()
         self.use_attention = use_attention
 
-        self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
-        if pretrained_embeddings is not None:
-            self.embedding.weight = nn.Parameter(pretrained_embeddings)
-            # fine-tune: leave requires_grad=True (default)
-
         self.lstm = nn.LSTM(
-            input_size    = embed_dim,
+            input_size    = input_dim,
             hidden_size   = hidden_dim,
             num_layers    = num_layers,
             batch_first   = True,
@@ -353,30 +341,31 @@ class BiLSTMClassifier(nn.Module):
 
         self.classifier = nn.Linear(hidden_dim * 2, num_classes)
 
-    def forward(self, input_ids, lengths):
-        x = self.dropout(self.embedding(input_ids))   # (B, T, E)
+    def forward(self, embeddings, lengths):
+        x = self.dropout(embeddings)   # (B, T, FLAIR_DIM)
 
         packed             = nn.utils.rnn.pack_padded_sequence(
-            x, lengths.cpu(), batch_first=True, enforce_sorted=False
+            x, lengths.cpu().clamp(min=1), batch_first=True, enforce_sorted=False
         )
         output, (hidden, _) = self.lstm(packed)
         output, _          = nn.utils.rnn.pad_packed_sequence(
             output, batch_first=True
-        )  # (B, T, H*2)
+        )  # (B, T, hidden*2)
 
         if self.use_attention:
-            scores  = self.attn_proj(output).squeeze(-1)           # (B, T)
-            mask    = (input_ids == 0)
-            scores  = scores.masked_fill(mask, -1e9)
-            weights = torch.softmax(scores, dim=-1)                # (B, T)
-            context = (output * weights.unsqueeze(-1)).sum(dim=1)  # (B, H*2)
+            scores  = self.attn_proj(output).squeeze(-1)         # (B, T)
+            max_t   = output.shape[1]
+            pad_mask = (torch.arange(max_t, device=lengths.device)
+                        .unsqueeze(0) >= lengths.unsqueeze(1))   # True = pad
+            scores  = scores.masked_fill(pad_mask, -1e9)
+            weights = torch.softmax(scores, dim=-1)
+            context = (output * weights.unsqueeze(-1)).sum(dim=1) # (B, hidden*2)
         else:
-            forward_h  = hidden[-2]                                # (B, H)
-            backward_h = hidden[-1]                                # (B, H)
-            context    = torch.cat([forward_h, backward_h], dim=-1)  # (B, H*2)
+            forward_h  = hidden[-2]
+            backward_h = hidden[-1]
+            context    = torch.cat([forward_h, backward_h], dim=-1)
 
-        context = self.dropout(context)
-        return self.classifier(context)
+        return self.classifier(self.dropout(context))
 
 
 # ─────────────────────────────────────────────
@@ -464,7 +453,7 @@ def save_all_runs_comparison(all_results):
         for bar, v in zip(bars, vals):
             ax.text(bar.get_x() + bar.get_width() / 2, v + 0.01,
                     f"{v:.3f}", ha="center", va="bottom", fontsize=9)
-    plt.suptitle("BiLSTM + GloVe — Test Set Comparison Across Runs", fontsize=13, y=1.02)
+    plt.suptitle("Flair BiLSTM — Test Set Comparison Across Runs", fontsize=13, y=1.02)
     plt.tight_layout()
     plt.savefig(os.path.join(OUT_DIR, "all_runs_comparison.png"), dpi=150, bbox_inches="tight")
     plt.close()
@@ -472,10 +461,9 @@ def save_all_runs_comparison(all_results):
 
 
 def save_per_class_f1_comparison(all_results, split="test"):
-    run_names = [r["run"] for r in all_results]
-    colors    = ["#4e79a7", "#f28e2b", "#e15759"]
-    x         = np.arange(len(LABELS))
-    width     = 0.25
+    colors = ["#4e79a7", "#f28e2b", "#e15759"]
+    x      = np.arange(len(LABELS))
+    width  = 0.25
 
     fig, ax = plt.subplots(figsize=(12, 6))
     for i, (result, color) in enumerate(zip(all_results, colors)):
@@ -488,7 +476,7 @@ def save_per_class_f1_comparison(all_results, split="test"):
     ax.set_xticklabels(LABELS, rotation=30, ha="right")
     ax.set_ylabel("F1 Score")
     ax.set_ylim(0, 1)
-    ax.set_title(f"Per-Class F1 Comparison ({split.title()} Set) — BiLSTM + GloVe")
+    ax.set_title(f"Per-Class F1 Comparison ({split.title()} Set) — Flair BiLSTM")
     ax.legend()
     plt.tight_layout()
     plt.savefig(os.path.join(OUT_DIR, "per_class_f1_comparison.png"), dpi=150)
@@ -515,12 +503,12 @@ def train_epoch(model, loader, optimizer, loss_fn):
     total_loss, all_preds, all_labels = 0.0, [], []
 
     for batch in loader:
-        input_ids = batch["input_ids"].to(DEVICE)
-        lengths   = batch["length"].to(DEVICE)
-        labels    = batch["label"].to(DEVICE)
+        embs   = batch["embeddings"].to(DEVICE)
+        lens   = batch["length"].to(DEVICE)
+        labels = batch["label"].to(DEVICE)
 
         optimizer.zero_grad()
-        logits = model(input_ids, lengths)
+        logits = model(embs, lens)
         loss   = loss_fn(logits, labels)
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -535,7 +523,7 @@ def train_epoch(model, loader, optimizer, loss_fn):
         [ID2LABEL[i] for i in all_labels],
         [ID2LABEL[i] for i in all_preds],
     )
-    return avg_loss, metrics, all_labels, all_preds
+    return avg_loss, metrics
 
 
 def eval_epoch(model, loader, loss_fn):
@@ -544,11 +532,11 @@ def eval_epoch(model, loader, loss_fn):
 
     with torch.no_grad():
         for batch in loader:
-            input_ids = batch["input_ids"].to(DEVICE)
-            lengths   = batch["length"].to(DEVICE)
-            labels    = batch["label"].to(DEVICE)
+            embs   = batch["embeddings"].to(DEVICE)
+            lens   = batch["length"].to(DEVICE)
+            labels = batch["label"].to(DEVICE)
 
-            logits = model(input_ids, lengths)
+            logits = model(embs, lens)
             loss   = loss_fn(logits, labels)
 
             total_loss += loss.item()
@@ -567,8 +555,9 @@ def eval_epoch(model, loader, loss_fn):
 # ─────────────────────────────────────────────
 # MAIN EXPERIMENT RUNNER
 # ─────────────────────────────────────────────
-def run_experiment(run_name, train_df, val_df, test_df, vocab,
-                   embed_matrix, use_eda=False, use_attention=False):
+def run_experiment(run_name, train_df, val_df, test_df,
+                   val_embs, val_lens, test_embs, test_lens,
+                   flair_model, use_eda=False, use_attention=False):
 
     print(f"\n{'='*60}")
     print(f"  RUN      : {run_name}")
@@ -577,37 +566,38 @@ def run_experiment(run_name, train_df, val_df, test_df, vocab,
 
     set_seed()
 
+    # augment text first, then extract Flair embeddings for the (possibly larger) train set
     train_data = augment_minority_classes(train_df.copy()) if use_eda else train_df.copy()
     print(f"  Train: {len(train_data)}  |  Val: {len(val_df)}  |  Test: {len(test_df)}")
 
-    # class weights from training data
+    print("  Extracting Flair embeddings for training set...")
+    train_embs, train_lens = extract_embeddings(
+        train_data["text"].tolist(), flair_model, desc="Train"
+    )
+
+    train_ds = EmbeddingDataset(train_embs, train_lens, train_data)
+    val_ds   = EmbeddingDataset(val_embs,   val_lens,   val_df)
+    test_ds  = EmbeddingDataset(test_embs,  test_lens,  test_df)
+
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,  num_workers=0)
+    val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+    test_loader  = DataLoader(test_ds,  batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+
     y_train      = train_data["label"].map(LABEL2ID).values
     cw           = compute_class_weight("balanced", classes=np.arange(NUM_LABELS), y=y_train)
     class_weights = torch.tensor(cw, dtype=torch.float)
 
-    # datasets & loaders
-    train_ds = RedditDataset(train_data, vocab)
-    val_ds   = RedditDataset(val_df,     vocab)
-    test_ds  = RedditDataset(test_df,    vocab)
-
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,  num_workers=2, pin_memory=True)
-    val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
-    test_loader  = DataLoader(test_ds,  batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
-
-    # model — initialize embedding from GloVe matrix
     model = BiLSTMClassifier(
-        vocab_size            = len(vocab),
-        embed_dim             = EMBED_DIM,
-        hidden_dim            = HIDDEN_DIM,
-        num_layers            = NUM_LAYERS,
-        num_classes           = NUM_LABELS,
-        dropout               = DROPOUT,
-        pretrained_embeddings = embed_matrix.clone(),  # clone so each run starts fresh
-        use_attention         = use_attention,
+        input_dim     = FLAIR_DIM,
+        hidden_dim    = HIDDEN_DIM,
+        num_layers    = NUM_LAYERS,
+        num_classes   = NUM_LABELS,
+        dropout       = DROPOUT,
+        use_attention = use_attention,
     ).to(DEVICE)
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"  Trainable parameters: {total_params:,}")
+    print(f"  Task BiLSTM trainable parameters: {total_params:,}")
 
     loss_fn   = WeightedCELoss(class_weights)
     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
@@ -618,7 +608,7 @@ def run_experiment(run_name, train_df, val_df, test_df, vocab,
     train_losses, val_losses = [], []
 
     for epoch in range(1, EPOCHS + 1):
-        tr_loss, tr_met, _, _    = train_epoch(model, train_loader, optimizer, loss_fn)
+        tr_loss, tr_met          = train_epoch(model, train_loader, optimizer, loss_fn)
         vl_loss, vl_met, _, _, _ = eval_epoch(model, val_loader,   loss_fn)
 
         train_losses.append(tr_loss)
@@ -648,20 +638,20 @@ def run_experiment(run_name, train_df, val_df, test_df, vocab,
     vl_lbl_str = [ID2LABEL[i] for i in vl_lbl]; vl_prd_str = [ID2LABEL[i] for i in vl_prd]
     ts_lbl_str = [ID2LABEL[i] for i in ts_lbl]; ts_prd_str = [ID2LABEL[i] for i in ts_prd]
 
-    print(f"\n  Train — Acc {tr_met['accuracy']:.4f}  F1 {tr_met['f1_macro']:.4f}")
-    print(f"  Val   — Acc {vl_met['accuracy']:.4f}  F1 {vl_met['f1_macro']:.4f}")
-    print(f"  Test  — Acc {ts_met['accuracy']:.4f}  F1 {ts_met['f1_macro']:.4f}")
+    print(f"\n  Train -- Acc {tr_met['accuracy']:.4f}  F1 {tr_met['f1_macro']:.4f}")
+    print(f"  Val   -- Acc {vl_met['accuracy']:.4f}  F1 {vl_met['f1_macro']:.4f}")
+    print(f"  Test  -- Acc {ts_met['accuracy']:.4f}  F1 {ts_met['f1_macro']:.4f}")
 
     prefix = os.path.join(OUT_DIR, run_name)
 
     save_loss_curves(train_losses, val_losses,
-                     f"{run_name} — Loss Curves", f"{prefix}_loss_curves.png")
+                     f"{run_name} Loss Curves", f"{prefix}_loss_curves.png")
 
     for split_name, y_t, y_p in [("train", tr_lbl_str, tr_prd_str),
                                   ("val",   vl_lbl_str, vl_prd_str),
                                   ("test",  ts_lbl_str, ts_prd_str)]:
         save_confusion_matrix(y_t, y_p,
-                              f"{run_name} — {split_name.title()} Confusion Matrix",
+                              f"{run_name} {split_name.title()} Confusion Matrix",
                               f"{prefix}_{split_name}_confusion_matrix.png")
 
     for split_name, y_t, y_p in [("val",  vl_lbl_str, vl_prd_str),
@@ -682,12 +672,12 @@ def run_experiment(run_name, train_df, val_df, test_df, vocab,
     ]
     pd.DataFrame(misclassified).to_csv(f"{prefix}_test_misclassified.csv", index=False)
 
-    # CodaBench submission (id, label)
     submission_df   = pd.DataFrame({"id": ts_ids, "label": ts_prd_str})
     submission_path = f"{prefix}_submission.csv"
     submission_df.to_csv(submission_path, index=False)
     print(f"  Saved: {run_name}_submission.csv  ({len(submission_df)} rows)")
-    print(f"  All outputs saved to diagrams/{run_name}_*")
+
+    del train_embs, train_lens, train_ds   # free RAM before next run
 
     return {
         "run":             run_name,
@@ -719,51 +709,43 @@ if __name__ == "__main__":
 
     save_label_distribution(train_df, val_df, test_df)
 
-    # build vocab from training data
-    print("\nBuilding vocabulary from training data...")
-    vocab = build_vocab(train_df["text"].tolist(), min_freq=VOCAB_MIN_FREQ)
-    print(f"  Vocabulary size: {len(vocab):,} tokens  (min_freq={VOCAB_MIN_FREQ})")
+    # Load Flair pretrained BiLSTM once — shared across all 3 runs
+    print("\nLoading Flair pretrained BiLSTM language model...")
+    flair_model = load_flair_model()
 
-    # load GloVe and build embedding matrix (shared across all runs)
-    print("\nPreparing GloVe embedding matrix...")
-    glove      = load_glove()
-    embed_matrix = build_embedding_matrix(vocab, glove)
-    del glove   # free memory after building matrix
+    # Pre-extract val and test embeddings once — reused by all 3 runs
+    print("\nExtracting Flair embeddings for val and test sets (done once)...")
+    val_embs,  val_lens  = extract_embeddings(val_df["text"].tolist(),  flair_model, "Val")
+    test_embs, test_lens = extract_embeddings(test_df["text"].tolist(), flair_model, "Test")
 
-    # ── Run 1: BiLSTM + GloVe, no augmentation, no attention ─────────────
+    # Run 1 — base: Flair BiLSTM, no EDA, no attention
     r1 = run_experiment(
-        run_name      = "run1_bilstm_base",
-        train_df      = train_df,
-        val_df        = val_df,
-        test_df       = test_df,
-        vocab         = vocab,
-        embed_matrix  = embed_matrix,
-        use_eda       = False,
-        use_attention = False,
+        run_name="run1_bilstm_base",
+        train_df=train_df, val_df=val_df, test_df=test_df,
+        val_embs=val_embs, val_lens=val_lens,
+        test_embs=test_embs, test_lens=test_lens,
+        flair_model=flair_model,
+        use_eda=False, use_attention=False,
     )
 
-    # ── Run 2: BiLSTM + GloVe + EDA augmentation ─────────────────────────
+    # Run 2 — EDA: augment minority classes then extract embeddings
     r2 = run_experiment(
-        run_name      = "run2_bilstm_eda",
-        train_df      = train_df,
-        val_df        = val_df,
-        test_df       = test_df,
-        vocab         = vocab,
-        embed_matrix  = embed_matrix,
-        use_eda       = True,
-        use_attention = False,
+        run_name="run2_bilstm_eda",
+        train_df=train_df, val_df=val_df, test_df=test_df,
+        val_embs=val_embs, val_lens=val_lens,
+        test_embs=test_embs, test_lens=test_lens,
+        flair_model=flair_model,
+        use_eda=True, use_attention=False,
     )
 
-    # ── Run 3: BiLSTM + GloVe + Attention ────────────────────────────────
+    # Run 3 — attention: soft attention over all hidden states
     r3 = run_experiment(
-        run_name      = "run3_bilstm_attention",
-        train_df      = train_df,
-        val_df        = val_df,
-        test_df       = test_df,
-        vocab         = vocab,
-        embed_matrix  = embed_matrix,
-        use_eda       = False,
-        use_attention = True,
+        run_name="run3_bilstm_attention",
+        train_df=train_df, val_df=val_df, test_df=test_df,
+        val_embs=val_embs, val_lens=val_lens,
+        test_embs=test_embs, test_lens=test_lens,
+        flair_model=flair_model,
+        use_eda=False, use_attention=True,
     )
 
     all_results = [r1, r2, r3]
