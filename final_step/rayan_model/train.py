@@ -1,25 +1,33 @@
 """
-Rayan Nasrallah — COMPSCI 4NL3 Final Project
-Model: BiLSTM classifier on top of frozen Flair pretrained character BiLSTM embeddings
-Task: 5-class Reddit comment classification
-      (ADVICE, ANECDOTE, APPRAISAL, EMOTIONAL_SUPPORT, WARNING)
+Rayan Nasrallah -- COMPSCI 4NL3 Final Project
+Model  : ULMFiT (AWD-LSTM) pretrained language model, fine-tuned for classification
+Task   : 5-class Reddit comment classification
+         (ADVICE, ANECDOTE, APPRAISAL, EMOTIONAL_SUPPORT, WARNING)
+
+TRUE PRETRAINED LSTM ENCODER -- not a transformer, not just static embeddings.
 
 Architecture:
-  Flair 'news-forward-fast' is a character-level Bidirectional LSTM language model
-  pretrained on a large English news corpus (NOT a transformer). It produces
-  1024-dim contextual token embeddings where each word's representation depends
-  on all surrounding characters and words in the full sentence.
+  AWD-LSTM (Merity et al., 2017) -- 3-layer Bidirectional LSTM with weight
+  dropping, variational dropout, and ASGD-based optimization. Pretrained on
+  WikiText-103 (~103M tokens) via the fastai ULMFiT framework (Howard & Ruder,
+  2018). The encoder captures broad English language structure before seeing any
+  task data.
 
-  These Flair BiLSTM embeddings are frozen (not updated). A small task-specific
-  BiLSTM classifier is trained on top:
-    Flair character BiLSTM (frozen, pretrained, 1024-dim output per token)
-      -> Task BiLSTM (hidden=256, bidirectional -> 512-dim)
-      -> Dropout -> Linear(512, 5)
+  Classification head: concat-pooling (last hidden + max-pool + mean-pool over
+  all timesteps) -> BatchNorm -> Dropout -> Linear -> ReLU -> BatchNorm ->
+  Dropout -> Linear(5).
+
+  Fine-tuning strategy: gradual unfreezing + discriminative learning rates
+  (ULMFiT approach designed specifically for small labeled datasets).
 
 3 Ablation Runs:
-  Run 1: Flair features + BiLSTM classifier + Weighted CE         (base)
-  Run 2: Flair features + BiLSTM classifier + EDA + Weighted CE  (+ augmentation)
-  Run 3: Flair features + BiLSTM + Attention + Weighted CE       (+ attention)
+  Run 1: Frozen AWD-LSTM encoder, only classifier head trained        (base)
+  Run 2: Frozen encoder + EDA augmentation on minority classes        (+ data)
+  Run 3: Frozen -> gradual full unfreeze + EDA + discriminative LRs  (+ unfreeze)
+
+  Run 1 vs 2: measures the effect of augmentation with a frozen encoder.
+  Run 2 vs 3: measures how much fine-tuning the encoder itself adds beyond
+              just adapting the classification head.
 
 Outputs (all saved to rayan_model/diagrams/):
   - label_distribution.png
@@ -35,10 +43,11 @@ Outputs (all saved to rayan_model/diagrams/):
   - best_submission.zip          <-- final CodaBench submission
 
 Setup (run once on the VM):
-  pip install torch scikit-learn matplotlib seaborn nltk pandas numpy flair
+  pip install fastai
   python -c "import nltk; nltk.download('wordnet'); nltk.download('stopwords'); nltk.download('omw-1.4')"
 
-  Flair model (~74MB) downloads automatically on first run.
+  AWD-LSTM pretrained weights (~24MB) download automatically on first run from
+  fast.ai model zoo.
 
 Run:
   cd final_step/
@@ -52,47 +61,49 @@ import zipfile
 import warnings
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")          # non-interactive backend -- must come before pyplot
 import matplotlib.pyplot as plt
 import seaborn as sns
 
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
 
 from sklearn.metrics import (
-    accuracy_score,
-    f1_score,
-    precision_score,
-    recall_score,
-    classification_report,
-    confusion_matrix,
+    accuracy_score, f1_score, precision_score, recall_score,
+    classification_report, confusion_matrix,
 )
 from sklearn.utils.class_weight import compute_class_weight
 
 import nltk
 from nltk.corpus import wordnet, stopwords
 
-from flair.embeddings import FlairEmbeddings
-from flair.data import Sentence
+from fastai.text.all import (
+    TextDataLoaders,
+    text_classifier_learner,
+    AWD_LSTM,
+    CrossEntropyLossFlat,
+    Callback,
+)
 
 warnings.filterwarnings("ignore")
 
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
-SEED          = 42
-MAX_LEN       = 64        # tokens per sequence (Flair tokenizes internally)
-FLAIR_DIM     = 1024      # news-forward-fast output dimension
-HIDDEN_DIM    = 256       # task BiLSTM hidden per direction (512 after concat)
-NUM_LAYERS    = 1
-DROPOUT       = 0.5
-BATCH_SIZE    = 32
-EPOCHS        = 30
-LR            = 1e-3
-WEIGHT_DECAY  = 1e-4
-PATIENCE      = 5
-EXTRACT_BATCH = 64        # sentences per Flair forward pass
-DEVICE        = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+SEED    = 42
+BS      = 16        # small batch -- better gradient signal on 1400 examples
+DROP    = 0.3       # drop_mult: scales all AWD-LSTM dropout rates down
+
+# Frozen-only training (Runs 1 & 2)
+EPOCHS_FROZEN = 6
+LR_HEAD       = 2e-2   # one-cycle LR for classifier head
+
+# Gradual-unfreeze phase (Run 3 only -- stacks on top of frozen phase)
+EPOCHS_UNFREEZE = 8
+LR_UNFREEZE     = slice(1e-5, 1e-3)   # discriminative LR: low for early layers, high for last
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 LABELS     = ["ADVICE", "ANECDOTE", "APPRAISAL", "EMOTIONAL_SUPPORT", "WARNING"]
 LABEL2ID   = {l: i for i, l in enumerate(LABELS)}
@@ -112,7 +123,7 @@ def set_seed(seed=SEED):
 
 set_seed()
 print(f"Device : {DEVICE}")
-print(f"Model  : Flair BiLSTM (frozen, {FLAIR_DIM}d) -> task BiLSTM (hidden={HIDDEN_DIM})")
+print(f"Model  : ULMFiT AWD-LSTM (pretrained, WikiText-103)")
 
 
 # ─────────────────────────────────────────────
@@ -133,9 +144,9 @@ def get_synonyms(word):
 
 def synonym_replacement(words, n):
     new_words = words.copy()
-    non_stop = [w for w in words if w.lower() not in STOP_WORDS]
+    non_stop  = [w for w in words if w.lower() not in STOP_WORDS]
     random.shuffle(non_stop)
-    replaced = 0
+    replaced  = 0
     for word in non_stop:
         syns = get_synonyms(word)
         if syns:
@@ -219,165 +230,23 @@ def load_split(filename):
 
 
 # ─────────────────────────────────────────────
-# FLAIR EMBEDDING EXTRACTION
+# LOSS TRACKER CALLBACK
 # ─────────────────────────────────────────────
-def load_flair_model():
-    """
-    Load Flair 'news-forward-fast': a character-level BiLSTM language model
-    pretrained on English news text. ~74MB, cached after first download.
-    Output: 1024-dim contextual embedding per token.
-    """
-    print("  Loading Flair 'news-forward-fast' pretrained BiLSTM (~74MB first run)...")
-    model = FlairEmbeddings("news-forward-fast")
-    print("  Flair model ready.")
-    return model
+class EpochLossTracker(Callback):
+    """Records mean training loss per epoch for loss-curve plots."""
 
+    def before_fit(self):
+        self.epoch_train_losses = []
+        self._batch_buf         = []
 
-def extract_embeddings(texts, flair_model, desc=""):
-    """
-    Pass texts through the frozen Flair BiLSTM to get contextual token embeddings.
-    Returns:
-      embeddings : (N, MAX_LEN, FLAIR_DIM) float32 CPU tensor
-      lengths    : (N,) int64 CPU tensor
-    """
-    all_embs = []
-    all_lens = []
-    n = len(texts)
+    def after_batch(self):
+        if self.training:
+            self._batch_buf.append(float(self.smooth_loss))
 
-    for i in range(0, n, EXTRACT_BATCH):
-        batch_texts = texts[i: i + EXTRACT_BATCH]
-        sentences   = [Sentence(t if t.strip() else "empty") for t in batch_texts]
-
-        # Truncate long sentences before embedding to save time and memory
-        for sent in sentences:
-            if len(sent) > MAX_LEN:
-                sent.tokens = sent.tokens[:MAX_LEN]
-
-        flair_model.embed(sentences)
-
-        for sent in sentences:
-            tok_embs = torch.stack([tok.embedding.detach().cpu() for tok in sent])
-            n_tok    = tok_embs.shape[0]
-            length   = max(min(n_tok, MAX_LEN), 1)
-
-            if n_tok < MAX_LEN:
-                pad      = torch.zeros(MAX_LEN - n_tok, FLAIR_DIM)
-                tok_embs = torch.cat([tok_embs, pad], dim=0)
-            else:
-                tok_embs = tok_embs[:MAX_LEN]
-
-            all_embs.append(tok_embs)
-            all_lens.append(length)
-
-            # Free GPU/CPU memory held by Flair token embeddings
-            for tok in sent:
-                tok.clear_embeddings()
-
-        done = min(i + EXTRACT_BATCH, n)
-        if done % 128 == 0 or done == n:
-            print(f"    [{desc}] {done}/{n} texts...")
-
-    return torch.stack(all_embs), torch.tensor(all_lens, dtype=torch.long)
-
-
-# ─────────────────────────────────────────────
-# DATASET
-# ─────────────────────────────────────────────
-class EmbeddingDataset(Dataset):
-    """Dataset backed by pre-computed Flair embeddings."""
-
-    def __init__(self, embeddings, lengths, df):
-        self.embeddings = embeddings      # (N, MAX_LEN, FLAIR_DIM)
-        self.lengths    = lengths         # (N,)
-        self.labels     = [LABEL2ID[l] for l in df["label"].tolist()]
-        self.ids        = df["id"].tolist()
-
-    def __len__(self):
-        return len(self.labels)
-
-    def __getitem__(self, idx):
-        return {
-            "embeddings": self.embeddings[idx],
-            "length":     self.lengths[idx],
-            "label":      torch.tensor(self.labels[idx], dtype=torch.long),
-            "sample_id":  self.ids[idx],
-        }
-
-
-# ─────────────────────────────────────────────
-# MODEL
-# ─────────────────────────────────────────────
-class BiLSTMClassifier(nn.Module):
-    """
-    Task BiLSTM trained on top of frozen Flair contextual embeddings.
-
-    Without attention (Runs 1 & 2):
-      Concatenate the final forward and backward hidden states of the LSTM
-      and feed to the linear classifier.
-
-    With attention (Run 3):
-      A learned linear projection scores every timestep. Softmax turns scores
-      into weights. The classification vector is the weighted sum of all hidden
-      states, letting the model focus on the most informative words.
-    """
-
-    def __init__(self, input_dim, hidden_dim, num_layers, num_classes,
-                 dropout, use_attention=False):
-        super().__init__()
-        self.use_attention = use_attention
-
-        self.lstm = nn.LSTM(
-            input_size    = input_dim,
-            hidden_size   = hidden_dim,
-            num_layers    = num_layers,
-            batch_first   = True,
-            bidirectional = True,
-            dropout       = dropout if num_layers > 1 else 0.0,
-        )
-        self.dropout = nn.Dropout(dropout)
-
-        if use_attention:
-            self.attn_proj = nn.Linear(hidden_dim * 2, 1)
-
-        self.classifier = nn.Linear(hidden_dim * 2, num_classes)
-
-    def forward(self, embeddings, lengths):
-        x = self.dropout(embeddings)   # (B, T, FLAIR_DIM)
-
-        packed             = nn.utils.rnn.pack_padded_sequence(
-            x, lengths.cpu().clamp(min=1), batch_first=True, enforce_sorted=False
-        )
-        output, (hidden, _) = self.lstm(packed)
-        output, _          = nn.utils.rnn.pad_packed_sequence(
-            output, batch_first=True
-        )  # (B, T, hidden*2)
-
-        if self.use_attention:
-            scores  = self.attn_proj(output).squeeze(-1)         # (B, T)
-            max_t   = output.shape[1]
-            pad_mask = (torch.arange(max_t, device=lengths.device)
-                        .unsqueeze(0) >= lengths.unsqueeze(1))   # True = pad
-            scores  = scores.masked_fill(pad_mask, -1e9)
-            weights = torch.softmax(scores, dim=-1)
-            context = (output * weights.unsqueeze(-1)).sum(dim=1) # (B, hidden*2)
-        else:
-            forward_h  = hidden[-2]
-            backward_h = hidden[-1]
-            context    = torch.cat([forward_h, backward_h], dim=-1)
-
-        return self.classifier(self.dropout(context))
-
-
-# ─────────────────────────────────────────────
-# LOSS
-# ─────────────────────────────────────────────
-class WeightedCELoss(nn.Module):
-    def __init__(self, class_weights):
-        super().__init__()
-        self.ce = nn.CrossEntropyLoss(weight=class_weights.to(DEVICE))
-
-    def forward(self, logits, targets):
-        return self.ce(logits, targets)
+    def after_epoch(self):
+        if self._batch_buf:
+            self.epoch_train_losses.append(float(np.mean(self._batch_buf)))
+            self._batch_buf = []
 
 
 # ─────────────────────────────────────────────
@@ -424,10 +293,10 @@ def save_loss_curves(train_losses, val_losses, title, path):
 
 def save_label_distribution(train_df, val_df, test_df):
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-    for ax, (df, name) in zip(axes, [(train_df, "Train"), (val_df, "Validation"), (test_df, "Test")]):
+    for ax, (df, name) in zip(axes, [(train_df, "Train"), (val_df, "Val"), (test_df, "Test")]):
         counts = df["label"].value_counts().reindex(LABELS, fill_value=0)
         bars   = ax.bar(LABELS, counts.values, color="#4e79a7")
-        ax.set_title(f"{name} — Label Distribution")
+        ax.set_title(f"{name} Label Distribution")
         ax.tick_params(axis="x", rotation=45)
         for bar, v in zip(bars, counts.values):
             ax.text(bar.get_x() + bar.get_width() / 2, v + 0.3, str(v),
@@ -442,7 +311,6 @@ def save_all_runs_comparison(all_results):
     metrics = ["accuracy", "f1_macro", "f1_weighted", "precision_macro", "recall_macro"]
     runs    = [r["run"] for r in all_results]
     colors  = ["#4e79a7", "#f28e2b", "#e15759"]
-
     fig, axes = plt.subplots(1, len(metrics), figsize=(22, 5))
     for ax, metric in zip(axes, metrics):
         vals = [r["test"][metric] for r in all_results]
@@ -453,7 +321,7 @@ def save_all_runs_comparison(all_results):
         for bar, v in zip(bars, vals):
             ax.text(bar.get_x() + bar.get_width() / 2, v + 0.01,
                     f"{v:.3f}", ha="center", va="bottom", fontsize=9)
-    plt.suptitle("Flair BiLSTM — Test Set Comparison Across Runs", fontsize=13, y=1.02)
+    plt.suptitle("ULMFiT AWD-LSTM -- Test Set Comparison Across Runs", fontsize=13, y=1.02)
     plt.tight_layout()
     plt.savefig(os.path.join(OUT_DIR, "all_runs_comparison.png"), dpi=150, bbox_inches="tight")
     plt.close()
@@ -464,19 +332,17 @@ def save_per_class_f1_comparison(all_results, split="test"):
     colors = ["#4e79a7", "#f28e2b", "#e15759"]
     x      = np.arange(len(LABELS))
     width  = 0.25
-
     fig, ax = plt.subplots(figsize=(12, 6))
     for i, (result, color) in enumerate(zip(all_results, colors)):
         y_true       = result[f"{split}_labels"]
         y_pred       = result[f"{split}_preds"]
         per_class_f1 = f1_score(y_true, y_pred, labels=LABELS, average=None, zero_division=0)
         ax.bar(x + i * width, per_class_f1, width, label=result["run"], color=color)
-
     ax.set_xticks(x + width)
     ax.set_xticklabels(LABELS, rotation=30, ha="right")
     ax.set_ylabel("F1 Score")
     ax.set_ylim(0, 1)
-    ax.set_title(f"Per-Class F1 Comparison ({split.title()} Set) — Flair BiLSTM")
+    ax.set_title(f"Per-Class F1 Comparison ({split.title()} Set) -- ULMFiT AWD-LSTM")
     ax.legend()
     plt.tight_layout()
     plt.savefig(os.path.join(OUT_DIR, "per_class_f1_comparison.png"), dpi=150)
@@ -496,152 +362,121 @@ def save_summary_csv(all_results, split):
 
 
 # ─────────────────────────────────────────────
-# TRAINING / EVAL LOOPS
+# PREDICTION HELPER
 # ─────────────────────────────────────────────
-def train_epoch(model, loader, optimizer, loss_fn):
-    model.train()
-    total_loss, all_preds, all_labels = 0.0, [], []
-
-    for batch in loader:
-        embs   = batch["embeddings"].to(DEVICE)
-        lens   = batch["length"].to(DEVICE)
-        labels = batch["label"].to(DEVICE)
-
-        optimizer.zero_grad()
-        logits = model(embs, lens)
-        loss   = loss_fn(logits, labels)
-        loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
-
-        total_loss += loss.item()
-        all_preds.extend(logits.argmax(dim=-1).cpu().numpy())
-        all_labels.extend(labels.cpu().numpy())
-
-    avg_loss = total_loss / len(loader)
-    metrics  = compute_metrics(
-        [ID2LABEL[i] for i in all_labels],
-        [ID2LABEL[i] for i in all_preds],
-    )
-    return avg_loss, metrics
-
-
-def eval_epoch(model, loader, loss_fn):
-    model.eval()
-    total_loss, all_preds, all_labels, all_ids = 0.0, [], [], []
-
-    with torch.no_grad():
-        for batch in loader:
-            embs   = batch["embeddings"].to(DEVICE)
-            lens   = batch["length"].to(DEVICE)
-            labels = batch["label"].to(DEVICE)
-
-            logits = model(embs, lens)
-            loss   = loss_fn(logits, labels)
-
-            total_loss += loss.item()
-            all_preds.extend(logits.argmax(dim=-1).cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-            all_ids.extend(batch["sample_id"])
-
-    avg_loss = total_loss / len(loader)
-    metrics  = compute_metrics(
-        [ID2LABEL[i] for i in all_labels],
-        [ID2LABEL[i] for i in all_preds],
-    )
-    return avg_loss, metrics, all_labels, all_preds, all_ids
+def get_predictions(learn, texts):
+    """
+    Run inference on a list of raw text strings.
+    Returns: (probs tensor, pred_label_strings list)
+    Predictions are returned in the same order as the input list.
+    """
+    dl    = learn.dls.test_dl(texts, bs=BS, shuffle_fn=None)
+    probs = learn.get_preds(dl=dl, reorder=False, act=torch.nn.Softmax(dim=-1))[0]
+    vocab = list(learn.dls.vocab)          # list of label strings in fastai's order
+    preds = [vocab[i] for i in probs.argmax(dim=-1).tolist()]
+    return probs, preds
 
 
 # ─────────────────────────────────────────────
 # MAIN EXPERIMENT RUNNER
 # ─────────────────────────────────────────────
 def run_experiment(run_name, train_df, val_df, test_df,
-                   val_embs, val_lens, test_embs, test_lens,
-                   flair_model, use_eda=False, use_attention=False):
-
+                   use_eda=False, gradual_unfreeze=False):
+    """
+    use_eda           : augment minority training classes with EDA before training.
+    gradual_unfreeze  : after the frozen phase, unfreeze all layers and fine-tune
+                        with discriminative learning rates (Run 3 only).
+    """
     print(f"\n{'='*60}")
-    print(f"  RUN      : {run_name}")
-    print(f"  EDA      : {use_eda}  |  Attention : {use_attention}")
+    print(f"  RUN              : {run_name}")
+    print(f"  EDA              : {use_eda}")
+    print(f"  Gradual Unfreeze : {gradual_unfreeze}")
     print(f"{'='*60}\n")
 
     set_seed()
 
-    # augment text first, then extract Flair embeddings for the (possibly larger) train set
     train_data = augment_minority_classes(train_df.copy()) if use_eda else train_df.copy()
     print(f"  Train: {len(train_data)}  |  Val: {len(val_df)}  |  Test: {len(test_df)}")
 
-    print("  Extracting Flair embeddings for training set...")
-    train_embs, train_lens = extract_embeddings(
-        train_data["text"].tolist(), flair_model, desc="Train"
+    # ── Build fastai TextDataLoaders ──────────────────────────────────────
+    # Combine train + val with an is_valid column so fastai knows the split.
+    combined = pd.concat([
+        train_data[["text", "label"]].assign(is_valid=False),
+        val_df[["text", "label"]].assign(is_valid=True),
+    ], ignore_index=True)
+
+    dls = TextDataLoaders.from_df(
+        combined,
+        text_col  = "text",
+        label_col = "label",
+        valid_col = "is_valid",
+        bs        = BS,
+        seed      = SEED,
     )
 
-    train_ds = EmbeddingDataset(train_embs, train_lens, train_data)
-    val_ds   = EmbeddingDataset(val_embs,   val_lens,   val_df)
-    test_ds  = EmbeddingDataset(test_embs,  test_lens,  test_df)
+    fastai_vocab = list(dls.vocab)   # label strings in fastai's sorted order
+    print(f"  fastai label vocab : {fastai_vocab}")
 
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,  num_workers=0)
-    val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
-    test_loader  = DataLoader(test_ds,  batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+    # ── Class weights -- mapped to fastai's vocab order ───────────────────
+    y_train = train_data["label"].map(LABEL2ID).values
+    cw      = compute_class_weight("balanced", classes=np.arange(NUM_LABELS), y=y_train)
+    # Build weight tensor aligned with fastai's vocab (not our LABEL2ID order)
+    wt = torch.zeros(NUM_LABELS, dtype=torch.float)
+    for i, lbl in enumerate(fastai_vocab):
+        if lbl in LABEL2ID:
+            wt[i] = float(cw[LABEL2ID[lbl]])
+    wt = wt.to(DEVICE)
 
-    y_train      = train_data["label"].map(LABEL2ID).values
-    cw           = compute_class_weight("balanced", classes=np.arange(NUM_LABELS), y=y_train)
-    class_weights = torch.tensor(cw, dtype=torch.float)
+    # ── Create ULMFiT classifier ──────────────────────────────────────────
+    # pretrained=True downloads AWD-LSTM weights pretrained on WikiText-103.
+    learn = text_classifier_learner(
+        dls,
+        AWD_LSTM,
+        drop_mult  = DROP,
+        pretrained = True,
+        metrics    = [],
+    )
+    learn.loss_func = CrossEntropyLossFlat(weight=wt)
 
-    model = BiLSTMClassifier(
-        input_dim     = FLAIR_DIM,
-        hidden_dim    = HIDDEN_DIM,
-        num_layers    = NUM_LAYERS,
-        num_classes   = NUM_LABELS,
-        dropout       = DROPOUT,
-        use_attention = use_attention,
-    ).to(DEVICE)
+    # ── Training ──────────────────────────────────────────────────────────
+    tracker      = EpochLossTracker()
+    train_losses = []
+    val_losses   = []
 
-    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"  Task BiLSTM trainable parameters: {total_params:,}")
+    # Phase 1: frozen encoder -- train only the classification head
+    learn.freeze()
+    learn.fit_one_cycle(EPOCHS_FROZEN, LR_HEAD, cbs=[tracker])
+    train_losses += tracker.epoch_train_losses.copy()
+    val_losses   += [float(v[0]) for v in learn.recorder.values]
 
-    loss_fn   = WeightedCELoss(class_weights)
-    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    if gradual_unfreeze:
+        # Phase 2: unfreeze all layers, use discriminative LRs
+        # Early LSTM layers get lr_min; last LSTM layer + head get lr_max.
+        tracker.epoch_train_losses = []
+        learn.unfreeze()
+        learn.fit_one_cycle(EPOCHS_UNFREEZE, LR_UNFREEZE, cbs=[tracker])
+        train_losses += tracker.epoch_train_losses.copy()
+        val_losses   += [float(v[0]) for v in learn.recorder.values]
 
-    best_val_f1  = -1
-    best_state   = None
-    patience_cnt = 0
-    train_losses, val_losses = [], []
+    # ── Predictions on all three splits ───────────────────────────────────
+    _, tr_prd_str = get_predictions(learn, train_data["text"].tolist())
+    _, vl_prd_str = get_predictions(learn, val_df["text"].tolist())
+    _, ts_prd_str = get_predictions(learn, test_df["text"].tolist())
 
-    for epoch in range(1, EPOCHS + 1):
-        tr_loss, tr_met          = train_epoch(model, train_loader, optimizer, loss_fn)
-        vl_loss, vl_met, _, _, _ = eval_epoch(model, val_loader,   loss_fn)
+    tr_lbl_str = train_data["label"].tolist()
+    vl_lbl_str = val_df["label"].tolist()
+    ts_lbl_str = test_df["label"].tolist()
+    ts_ids     = test_df["id"].tolist()
 
-        train_losses.append(tr_loss)
-        val_losses.append(vl_loss)
-
-        print(f"  Epoch {epoch:>2}/{EPOCHS} | "
-              f"Train Loss {tr_loss:.4f} Acc {tr_met['accuracy']:.4f} | "
-              f"Val Loss {vl_loss:.4f} Acc {vl_met['accuracy']:.4f} F1 {vl_met['f1_macro']:.4f}")
-
-        if vl_met["f1_macro"] > best_val_f1:
-            best_val_f1  = vl_met["f1_macro"]
-            best_state   = {k: v.cpu() for k, v in model.state_dict().items()}
-            patience_cnt = 0
-        else:
-            patience_cnt += 1
-            if patience_cnt >= PATIENCE:
-                print(f"  Early stopping triggered at epoch {epoch}")
-                break
-
-    model.load_state_dict({k: v.to(DEVICE) for k, v in best_state.items()})
-
-    _, tr_met, tr_lbl, tr_prd, _      = eval_epoch(model, train_loader, loss_fn)
-    _, vl_met, vl_lbl, vl_prd, _      = eval_epoch(model, val_loader,   loss_fn)
-    _, ts_met, ts_lbl, ts_prd, ts_ids = eval_epoch(model, test_loader,  loss_fn)
-
-    tr_lbl_str = [ID2LABEL[i] for i in tr_lbl]; tr_prd_str = [ID2LABEL[i] for i in tr_prd]
-    vl_lbl_str = [ID2LABEL[i] for i in vl_lbl]; vl_prd_str = [ID2LABEL[i] for i in vl_prd]
-    ts_lbl_str = [ID2LABEL[i] for i in ts_lbl]; ts_prd_str = [ID2LABEL[i] for i in ts_prd]
+    tr_met = compute_metrics(tr_lbl_str, tr_prd_str)
+    vl_met = compute_metrics(vl_lbl_str, vl_prd_str)
+    ts_met = compute_metrics(ts_lbl_str, ts_prd_str)
 
     print(f"\n  Train -- Acc {tr_met['accuracy']:.4f}  F1 {tr_met['f1_macro']:.4f}")
     print(f"  Val   -- Acc {vl_met['accuracy']:.4f}  F1 {vl_met['f1_macro']:.4f}")
     print(f"  Test  -- Acc {ts_met['accuracy']:.4f}  F1 {ts_met['f1_macro']:.4f}")
 
+    # ── Save all outputs ───────────────────────────────────────────────────
     prefix = os.path.join(OUT_DIR, run_name)
 
     save_loss_curves(train_losses, val_losses,
@@ -676,13 +511,12 @@ def run_experiment(run_name, train_df, val_df, test_df,
     submission_path = f"{prefix}_submission.csv"
     submission_df.to_csv(submission_path, index=False)
     print(f"  Saved: {run_name}_submission.csv  ({len(submission_df)} rows)")
-
-    del train_embs, train_lens, train_ds   # free RAM before next run
+    print(f"  All outputs saved to diagrams/{run_name}_*")
 
     return {
         "run":             run_name,
         "use_eda":         use_eda,
-        "use_attention":   use_attention,
+        "gradual_unfreeze":gradual_unfreeze,
         "val":             vl_met,
         "test":            ts_met,
         "val_labels":      vl_lbl_str,
@@ -709,43 +543,43 @@ if __name__ == "__main__":
 
     save_label_distribution(train_df, val_df, test_df)
 
-    # Load Flair pretrained BiLSTM once — shared across all 3 runs
-    print("\nLoading Flair pretrained BiLSTM language model...")
-    flair_model = load_flair_model()
-
-    # Pre-extract val and test embeddings once — reused by all 3 runs
-    print("\nExtracting Flair embeddings for val and test sets (done once)...")
-    val_embs,  val_lens  = extract_embeddings(val_df["text"].tolist(),  flair_model, "Val")
-    test_embs, test_lens = extract_embeddings(test_df["text"].tolist(), flair_model, "Test")
-
-    # Run 1 — base: Flair BiLSTM, no EDA, no attention
+    # ── Run 1: Frozen encoder, no EDA ────────────────────────────────────
+    # Tests the pretrained AWD-LSTM representations as-is. Only the
+    # classification head (concat-pool -> linear layers) is trained.
     r1 = run_experiment(
-        run_name="run1_bilstm_base",
-        train_df=train_df, val_df=val_df, test_df=test_df,
-        val_embs=val_embs, val_lens=val_lens,
-        test_embs=test_embs, test_lens=test_lens,
-        flair_model=flair_model,
-        use_eda=False, use_attention=False,
+        run_name         = "run1_ulmfit_frozen",
+        train_df         = train_df,
+        val_df           = val_df,
+        test_df          = test_df,
+        use_eda          = False,
+        gradual_unfreeze = False,
     )
 
-    # Run 2 — EDA: augment minority classes then extract embeddings
+    # ── Run 2: Frozen encoder + EDA ───────────────────────────────────────
+    # Same as Run 1 but minority classes are oversampled via EDA before
+    # training. Isolates the effect of augmentation from the effect of
+    # encoder fine-tuning.
     r2 = run_experiment(
-        run_name="run2_bilstm_eda",
-        train_df=train_df, val_df=val_df, test_df=test_df,
-        val_embs=val_embs, val_lens=val_lens,
-        test_embs=test_embs, test_lens=test_lens,
-        flair_model=flair_model,
-        use_eda=True, use_attention=False,
+        run_name         = "run2_ulmfit_frozen_eda",
+        train_df         = train_df,
+        val_df           = val_df,
+        test_df          = test_df,
+        use_eda          = True,
+        gradual_unfreeze = False,
     )
 
-    # Run 3 — attention: soft attention over all hidden states
+    # ── Run 3: Gradual unfreeze + EDA ─────────────────────────────────────
+    # Full ULMFiT fine-tuning: frozen phase (same as Run 2) followed by
+    # unfreezing all AWD-LSTM layers with discriminative learning rates
+    # (early layers get LR_MIN, last layer + head get LR_MAX). Isolates
+    # the added value of encoder fine-tuning over the frozen baseline.
     r3 = run_experiment(
-        run_name="run3_bilstm_attention",
-        train_df=train_df, val_df=val_df, test_df=test_df,
-        val_embs=val_embs, val_lens=val_lens,
-        test_embs=test_embs, test_lens=test_lens,
-        flair_model=flair_model,
-        use_eda=False, use_attention=True,
+        run_name         = "run3_ulmfit_gradual_unfreeze_eda",
+        train_df         = train_df,
+        val_df           = val_df,
+        test_df          = test_df,
+        use_eda          = True,
+        gradual_unfreeze = True,
     )
 
     all_results = [r1, r2, r3]
@@ -767,10 +601,10 @@ if __name__ == "__main__":
     print("\n" + "="*65)
     print("  FINAL RESULTS SUMMARY")
     print("="*65)
-    print(f"{'Run':<35} | {'Acc':>6} | {'F1 Mac':>7} | {'F1 Wt':>7}")
-    print(f"{'-'*35}-+-{'-'*6}-+-{'-'*7}-+-{'-'*7}")
+    print(f"{'Run':<42} | {'Acc':>6} | {'F1 Mac':>7} | {'F1 Wt':>7}")
+    print(f"{'-'*42}-+-{'-'*6}-+-{'-'*7}-+-{'-'*7}")
     for r in all_results:
         t = r["test"]
-        print(f"{r['run']:<35} | {t['accuracy']:>6.4f} | {t['f1_macro']:>7.4f} | {t['f1_weighted']:>7.4f}")
+        print(f"{r['run']:<42} | {t['accuracy']:>6.4f} | {t['f1_macro']:>7.4f} | {t['f1_weighted']:>7.4f}")
     print(f"\nAll outputs saved to: {OUT_DIR}/")
     print(f"Submit to CodaBench:  {zip_path}")
