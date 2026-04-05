@@ -1,0 +1,4 @@
+seed,embed_best_c,word_best_c,char_best_c,val_f1_macro,val_accuracy,thresholds
+42,2.0,2.0,0.1,0.4633954724406161,0.6033333333333334,"{'ADVICE': np.float64(0.11), 'ANECDOTE': np.float64(0.28), 'APPRAISAL': np.float64(0.19), 'EMOTIONAL_SUPPORT': np.float64(0.47), 'WARNING': np.float64(0.47)}"
+77,4.0,2.0,0.1,0.46470990919634525,0.5833333333333334,"{'ADVICE': np.float64(0.15), 'ANECDOTE': np.float64(0.31), 'APPRAISAL': np.float64(0.17), 'EMOTIONAL_SUPPORT': np.float64(0.33), 'WARNING': np.float64(0.39)}"
+123,2.0,2.0,0.1,0.43704992857219543,0.58,"{'ADVICE': np.float64(0.11), 'ANECDOTE': np.float64(0.26), 'APPRAISAL': np.float64(0.14), 'EMOTIONAL_SUPPORT': np.float64(0.45), 'WARNING': np.float64(0.39)}"
