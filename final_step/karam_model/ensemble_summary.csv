@@ -1,0 +1,2 @@
+model,seeds,validation_accuracy,validation_f1_macro,validation_precision_macro,validation_recall_macro,test_accuracy,test_f1_macro,test_precision_macro,test_recall_macro,final_thresholds
+intfloat/e5-large-v2,"[42, 77, 123]",0.5933333333333334,0.47242342198863935,0.5281826902359011,0.4489859354268024,0.67,0.5059699390428289,0.5574421768707483,0.4969152746057694,"{'ADVICE': np.float64(0.11), 'ANECDOTE': np.float64(0.25), 'APPRAISAL': np.float64(0.16), 'EMOTIONAL_SUPPORT': np.float64(0.4), 'WARNING': np.float64(0.37)}"
