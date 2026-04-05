@@ -1,0 +1,8 @@
+{
+  "run": "run1_ulmfit_frozen",
+  "accuracy": 0.2367,
+  "f1_macro": 0.1382,
+  "f1_weighted": 0.2354,
+  "precision_macro": 0.1432,
+  "recall_macro": 0.1383
+}

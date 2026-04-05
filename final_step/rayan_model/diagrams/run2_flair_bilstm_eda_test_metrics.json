@@ -1,0 +1,8 @@
+{
+  "run": "run2_flair_bilstm_eda",
+  "accuracy": 0.42,
+  "f1_macro": 0.3385,
+  "f1_weighted": 0.4145,
+  "precision_macro": 0.3625,
+  "recall_macro": 0.3849
+}

@@ -1,0 +1,8 @@
+{
+  "run": "run2_ulmfit_frozen_eda",
+  "accuracy": 0.2867,
+  "f1_macro": 0.2016,
+  "f1_weighted": 0.2894,
+  "precision_macro": 0.2016,
+  "recall_macro": 0.2075
+}

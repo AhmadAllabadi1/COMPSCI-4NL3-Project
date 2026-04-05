@@ -1,0 +1,14 @@
+Run: run2_ulmfit_frozen_eda
+Split: test
+
+                   precision    recall  f1-score   support
+
+           ADVICE       0.39      0.36      0.37       126
+         ANECDOTE       0.17      0.22      0.19        67
+        APPRAISAL       0.34      0.27      0.30        74
+EMOTIONAL_SUPPORT       0.11      0.07      0.09        14
+          WARNING       0.04      0.05      0.04        19
+
+         accuracy                           0.27       300
+        macro avg       0.21      0.20      0.20       300
+     weighted avg       0.29      0.27      0.28       300

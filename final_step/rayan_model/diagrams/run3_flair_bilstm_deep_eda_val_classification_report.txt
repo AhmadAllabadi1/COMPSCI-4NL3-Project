@@ -1,0 +1,14 @@
+Run: run3_flair_bilstm_deep_eda
+Split: val
+
+                   precision    recall  f1-score   support
+
+           ADVICE       0.62      0.70      0.66       125
+         ANECDOTE       0.57      0.54      0.56        68
+        APPRAISAL       0.47      0.31      0.37        74
+EMOTIONAL_SUPPORT       0.10      0.07      0.08        14
+          WARNING       0.06      0.11      0.07        19
+
+         accuracy                           0.50       300
+        macro avg       0.36      0.35      0.35       300
+     weighted avg       0.51      0.50      0.50       300

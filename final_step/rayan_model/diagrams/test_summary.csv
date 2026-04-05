@@ -1,0 +1,4 @@
+run,accuracy,f1_macro,f1_weighted,precision_macro,recall_macro
+run1_flair_bilstm_base,0.6,0.3947,0.5741,0.3913,0.4079
+run2_flair_bilstm_eda,0.42,0.3385,0.4145,0.3625,0.3849
+run3_flair_bilstm_deep_eda,0.5467,0.4274,0.5491,0.4589,0.4216
