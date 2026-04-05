@@ -372,7 +372,7 @@ def get_predictions(learn, texts):
     """
     dl    = learn.dls.test_dl(texts, bs=BS, shuffle_fn=None)
     probs = learn.get_preds(dl=dl, reorder=False, act=torch.nn.Softmax(dim=-1))[0]
-    vocab = list(learn.dls.vocab)          # list of label strings in fastai's order
+    vocab = list(learn.dls.vocab[1])       # dls.vocab = (text_vocab, label_vocab)
     preds = [vocab[i] for i in probs.argmax(dim=-1).tolist()]
     return probs, preds
 
@@ -414,7 +414,7 @@ def run_experiment(run_name, train_df, val_df, test_df,
         seed      = SEED,
     )
 
-    fastai_vocab = list(dls.vocab)   # label strings in fastai's sorted order
+    fastai_vocab = list(dls.vocab[1])   # dls.vocab = (text_vocab, label_vocab)
     print(f"  fastai label vocab : {fastai_vocab}")
 
     # ── Class weights -- mapped to fastai's vocab order ───────────────────
