@@ -1,23 +1,14 @@
 """
-Easy Data Augmentation (EDA) for Text Classification
-=====================================================
-Implements four augmentation techniques from Wei & Zou (2019):
-  1. Synonym Replacement (SR)
-  2. Random Insertion (RI)
-  3. Random Swap (RS)
-  4. Random Deletion (RD)
-
-Uses NLTK WordNet for synonym lookups.
+EDA (Easy Data Augmentation) - synonym replacement, random insertion,
+random swap, random deletion. Uses NLTK WordNet for synonyms.
 """
 
 import random
-import re
-from typing import List, Optional
+from collections import Counter
 
 import nltk
 from nltk.corpus import wordnet, stopwords
 
-# Download required NLTK data (only runs once)
 for resource in ["wordnet", "omw-1.4", "stopwords", "averaged_perceptron_tagger",
                  "averaged_perceptron_tagger_eng", "punkt", "punkt_tab"]:
     nltk.download(resource, quiet=True)
@@ -25,11 +16,7 @@ for resource in ["wordnet", "omw-1.4", "stopwords", "averaged_perceptron_tagger"
 STOP_WORDS = set(stopwords.words("english"))
 
 
-# ---------------------------------------------------------------------------
-# Helper: get synonyms from WordNet
-# ---------------------------------------------------------------------------
-def _get_synonyms(word: str) -> List[str]:
-    """Return a list of unique synonyms for the given word (excluding itself)."""
+def _get_synonyms(word):
     synonyms = set()
     for syn in wordnet.synsets(word):
         for lemma in syn.lemmas():
@@ -39,18 +26,8 @@ def _get_synonyms(word: str) -> List[str]:
     return list(synonyms)
 
 
-def _tokenize(text: str) -> List[str]:
-    """Simple whitespace + punctuation-aware tokenizer."""
-    return text.split()
-
-
-# ---------------------------------------------------------------------------
-# 1. Synonym Replacement
-# ---------------------------------------------------------------------------
-def synonym_replacement(words: List[str], n: int) -> List[str]:
-    """Replace n random non-stopword words with one of their WordNet synonyms."""
+def synonym_replacement(words, n):
     new_words = words.copy()
-    # Candidate words: not stopwords and alphabetic
     candidates = [w for w in new_words if w.lower() not in STOP_WORDS and w.isalpha()]
     random.shuffle(candidates)
     num_replaced = 0
@@ -65,35 +42,22 @@ def synonym_replacement(words: List[str], n: int) -> List[str]:
     return new_words
 
 
-# ---------------------------------------------------------------------------
-# 2. Random Insertion
-# ---------------------------------------------------------------------------
-def random_insertion(words: List[str], n: int) -> List[str]:
-    """Insert n random synonyms of random words at random positions."""
+def random_insertion(words, n):
     new_words = words.copy()
     for _ in range(n):
-        _add_word(new_words)
+        candidates = [w for w in new_words if w.lower() not in STOP_WORDS and w.isalpha()]
+        if not candidates:
+            break
+        random.shuffle(candidates)
+        for word in candidates:
+            synonyms = _get_synonyms(word)
+            if synonyms:
+                new_words.insert(random.randint(0, len(new_words)), random.choice(synonyms))
+                break
     return new_words
 
 
-def _add_word(words: List[str]) -> None:
-    """Pick a random non-stopword, find a synonym, insert at a random position."""
-    candidates = [w for w in words if w.lower() not in STOP_WORDS and w.isalpha()]
-    if not candidates:
-        return
-    random.shuffle(candidates)
-    for word in candidates:
-        synonyms = _get_synonyms(word)
-        if synonyms:
-            words.insert(random.randint(0, len(words)), random.choice(synonyms))
-            return
-
-
-# ---------------------------------------------------------------------------
-# 3. Random Swap
-# ---------------------------------------------------------------------------
-def random_swap(words: List[str], n: int) -> List[str]:
-    """Randomly swap two words n times."""
+def random_swap(words, n):
     new_words = words.copy()
     if len(new_words) < 2:
         return new_words
@@ -103,161 +67,78 @@ def random_swap(words: List[str], n: int) -> List[str]:
     return new_words
 
 
-# ---------------------------------------------------------------------------
-# 4. Random Deletion
-# ---------------------------------------------------------------------------
-def random_deletion(words: List[str], p: float) -> List[str]:
-    """Randomly delete each word with probability p."""
+def random_deletion(words, p):
     if len(words) <= 1:
         return words
     new_words = [w for w in words if random.random() > p]
-    # If everything got deleted, return one random word
     return new_words if new_words else [random.choice(words)]
 
 
-# ---------------------------------------------------------------------------
-# Main EDA function
-# ---------------------------------------------------------------------------
-def eda(
-    text: str,
-    alpha_sr: float = 0.1,
-    alpha_ri: float = 0.1,
-    alpha_rs: float = 0.1,
-    p_rd: float = 0.1,
-    num_aug: int = 4,
-) -> List[str]:
-    """
-    Apply EDA to a single sentence and return `num_aug` augmented versions.
-
-    Args:
-        text: Input sentence.
-        alpha_sr: Fraction of words to replace with synonyms.
-        alpha_ri: Fraction of words to insert.
-        alpha_rs: Fraction of words to swap.
-        p_rd: Probability of deleting each word.
-        num_aug: Total number of augmented sentences to generate.
-
-    Returns:
-        List of augmented sentence strings.
-    """
-    words = _tokenize(text)
+def eda(text, alpha_sr=0.1, alpha_ri=0.1, alpha_rs=0.1, p_rd=0.1, num_aug=4):
+    """Apply all 4 EDA ops and return num_aug augmented sentences."""
+    words = text.split()
     num_words = len(words)
 
-    # Number of words to change for SR, RI, RS
     n_sr = max(1, int(alpha_sr * num_words))
     n_ri = max(1, int(alpha_ri * num_words))
     n_rs = max(1, int(alpha_rs * num_words))
 
     augmented = set()
-
-    # Generate roughly num_aug / 4 from each technique, then fill remainder
     per_technique = max(1, num_aug // 4)
 
     for _ in range(per_technique):
-        aug = synonym_replacement(words, n_sr)
-        augmented.add(" ".join(aug))
-
+        augmented.add(" ".join(synonym_replacement(words, n_sr)))
     for _ in range(per_technique):
-        aug = random_insertion(words, n_ri)
-        augmented.add(" ".join(aug))
-
+        augmented.add(" ".join(random_insertion(words, n_ri)))
     for _ in range(per_technique):
-        aug = random_swap(words, n_rs)
-        augmented.add(" ".join(aug))
-
+        augmented.add(" ".join(random_swap(words, n_rs)))
     for _ in range(per_technique):
-        aug = random_deletion(words, p_rd)
-        augmented.add(" ".join(aug))
+        augmented.add(" ".join(random_deletion(words, p_rd)))
 
-    # Remove the original if it ended up in the set
     augmented.discard(text)
-
-    # Trim to num_aug
     result = list(augmented)
     random.shuffle(result)
     return result[:num_aug]
 
 
-def augment_dataset(
-    texts: List[str],
-    labels: List[str],
-    num_aug: int = 4,
-    alpha: float = 0.1,
-) -> tuple:
-    """
-    Augment an entire dataset. Returns (augmented_texts, augmented_labels)
-    containing ONLY the new augmented examples (not the originals).
-
-    Args:
-        texts: List of original text strings.
-        labels: Corresponding labels.
-        num_aug: Number of augmented versions per original sample.
-        alpha: EDA intensity parameter (used for SR, RI, RS, RD).
-
-    Returns:
-        Tuple of (new_texts, new_labels).
-    """
-    aug_texts = []
-    aug_labels = []
+def augment_dataset(texts, labels, num_aug=4, alpha=0.1):
+    """Augment every sample. Returns only the new augmented examples."""
+    aug_texts, aug_labels = [], []
     for text, label in zip(texts, labels):
-        augmented = eda(text, alpha_sr=alpha, alpha_ri=alpha, alpha_rs=alpha,
-                        p_rd=alpha, num_aug=num_aug)
-        for aug_text in augmented:
+        for aug_text in eda(text, alpha_sr=alpha, alpha_ri=alpha, alpha_rs=alpha,
+                            p_rd=alpha, num_aug=num_aug):
             aug_texts.append(aug_text)
             aug_labels.append(label)
     return aug_texts, aug_labels
 
 
-def augment_minority_classes(
-    texts: List[str],
-    labels: List[str],
-    target_count: Optional[int] = None,
-    alpha: float = 0.1,
-) -> tuple:
-    """
-    Oversample minority classes via EDA until each class reaches target_count.
-    Majority classes are left untouched. Returns ONLY the new augmented examples.
-
-    Args:
-        texts: List of original text strings.
-        labels: Corresponding labels.
-        target_count: Target sample count per class. Defaults to the count of
-                      the largest class.
-        alpha: EDA intensity parameter.
-
-    Returns:
-        Tuple of (new_texts, new_labels).
-    """
-    from collections import Counter
-
+def augment_minority_classes(texts, labels, target_count=None, alpha=0.1):
+    """Oversample minority classes with EDA until they reach target_count (default: majority count)."""
     class_counts = Counter(labels)
     if target_count is None:
         target_count = max(class_counts.values())
 
-    # Group texts by label
-    class_texts: dict[str, List[str]] = {}
+    # group texts by label
+    class_texts = {}
     for text, label in zip(texts, labels):
         class_texts.setdefault(label, []).append(text)
 
-    aug_texts = []
-    aug_labels = []
+    aug_texts, aug_labels = [], []
 
     for label, count in class_counts.items():
         if count >= target_count:
-            continue  # skip majority classes
+            continue
 
         needed = target_count - count
         source = class_texts[label]
-        # How many augmented versions per original to get close to needed
         num_aug_per = max(1, needed // count + 1)
 
         generated = 0
         for text in source:
             if generated >= needed:
                 break
-            augmented = eda(text, alpha_sr=alpha, alpha_ri=alpha, alpha_rs=alpha,
-                            p_rd=alpha, num_aug=num_aug_per)
-            for aug_text in augmented:
+            for aug_text in eda(text, alpha_sr=alpha, alpha_ri=alpha, alpha_rs=alpha,
+                                p_rd=alpha, num_aug=num_aug_per):
                 if generated >= needed:
                     break
                 aug_texts.append(aug_text)
