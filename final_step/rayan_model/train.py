@@ -1,18 +1,43 @@
 """
-Model: Bidirectional LSTM (BiLSTM) trained from scratch
+Rayan Nasrallah — COMPSCI 4NL3 Final Project
+Model: Bidirectional LSTM (BiLSTM) with GloVe pretrained embeddings
+Task: 5-class Reddit comment classification
+      (ADVICE, ANECDOTE, APPRAISAL, EMOTIONAL_SUPPORT, WARNING)
 
 Architecture:
-  - Word-level vocabulary built from training data (no pretrained model)
-  - 128-dimensional trainable word embeddings (random init)
+  - Word-level vocabulary built from training data
+  - 100-dim GloVe embeddings (glove-wiki-gigaword-100) used as pretrained init
+  - Embeddings are fine-tuned during training
   - 2-layer Bidirectional LSTM (hidden=256, output dim=512)
   - Run 3 adds a soft attention layer over all LSTM hidden states
 
 3 Ablation Runs:
-  Run 1: BiLSTM + Weighted Cross-Entropy                   (base)
-  Run 2: BiLSTM + EDA data augmentation + Weighted CE      (+ augmentation)
-  Run 3: BiLSTM + Attention + Weighted CE                  (+ attention)
+  Run 1: BiLSTM + GloVe + Weighted CE                    (base)
+  Run 2: BiLSTM + GloVe + Weighted CE + EDA              (+ augmentation)
+  Run 3: BiLSTM + GloVe + Attention + Weighted CE        (+ attention)
 
-All ouputs saved to rayan_model/diagrams/:
+Outputs (all saved to rayan_model/diagrams/):
+  - label_distribution.png
+  - runN_loss_curves.png
+  - runN_train/val/test_confusion_matrix.png
+  - runN_val/test_classification_report.txt
+  - runN_val/test_metrics.json
+  - runN_test_misclassified.csv
+  - runN_submission.csv          <-- CodaBench format (id, label)
+  - all_runs_comparison.png
+  - per_class_f1_comparison.png
+  - val_summary.csv / test_summary.csv
+  - best_submission.zip          <-- final CodaBench submission
+
+Setup (run once on the VM):
+  pip install torch scikit-learn matplotlib seaborn nltk pandas numpy gensim
+  python -c "import nltk; nltk.download('wordnet'); nltk.download('stopwords'); nltk.download('omw-1.4')"
+
+  GloVe vectors (~128MB) are downloaded automatically on first run via gensim.
+
+Run:
+  cd final_step/
+  python rayan_model/train.py
 """
 
 import os
@@ -46,24 +71,28 @@ from sklearn.utils.class_weight import compute_class_weight
 import nltk
 from nltk.corpus import wordnet, stopwords
 
+import gensim.downloader as gensim_api
+
 warnings.filterwarnings("ignore")
 
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
-SEED          = 42
-MAX_LEN       = 128       # max tokens per sequence (word-level)
-VOCAB_MIN_FREQ = 2        # min word frequency to include in vocab
-EMBED_DIM     = 128       # word embedding size
-HIDDEN_DIM    = 256       # LSTM hidden size (output = 512 after bidirectional concat)
-NUM_LAYERS    = 2         # LSTM layers
-DROPOUT       = 0.3
-BATCH_SIZE    = 64
-EPOCHS        = 20
-LR            = 1e-3
-WEIGHT_DECAY  = 1e-4
-PATIENCE      = 3
-DEVICE        = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+SEED           = 42
+MAX_LEN        = 128        # max tokens per sequence (word-level)
+VOCAB_MIN_FREQ = 1          # include all words seen in training (GloVe covers them)
+EMBED_DIM      = 100        # must match GloVe model dimension
+HIDDEN_DIM     = 256        # LSTM hidden size per direction (512 after bidir concat)
+NUM_LAYERS     = 2
+DROPOUT        = 0.4
+BATCH_SIZE     = 64
+EPOCHS         = 25
+LR             = 5e-4
+WEIGHT_DECAY   = 1e-4
+PATIENCE       = 4
+DEVICE         = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+GLOVE_MODEL_NAME = "glove-wiki-gigaword-100"   # ~128MB, cached by gensim after first download
 
 LABELS     = ["ADVICE", "ANECDOTE", "APPRAISAL", "EMOTIONAL_SUPPORT", "WARNING"]
 LABEL2ID   = {l: i for i, l in enumerate(LABELS)}
@@ -73,7 +102,7 @@ NUM_LABELS = len(LABELS)
 PAD_TOKEN = "<PAD>"
 UNK_TOKEN = "<UNK>"
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # final_step/
 OUT_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diagrams")
 os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -86,7 +115,7 @@ def set_seed(seed=SEED):
 
 set_seed()
 print(f"Device : {DEVICE}")
-print(f"Model  : BiLSTM (embed={EMBED_DIM}, hidden={HIDDEN_DIM}, layers={NUM_LAYERS})")
+print(f"Model  : BiLSTM + GloVe-100d (hidden={HIDDEN_DIM}, layers={NUM_LAYERS})")
 
 
 # ─────────────────────────────────────────────
@@ -162,7 +191,6 @@ def eda(sentence, alpha=0.1, num_aug=1):
 
 
 def augment_minority_classes(df, target_count=None):
-    """Oversample minority classes with EDA until they reach target_count."""
     counts   = df["label"].value_counts()
     majority = counts.max() if target_count is None else target_count
     new_rows = []
@@ -197,12 +225,10 @@ def load_split(filename):
 # VOCABULARY
 # ─────────────────────────────────────────────
 def simple_tokenize(text):
-    """Lowercase word-level tokenization."""
     return re.findall(r"\b\w+\b", text.lower())
 
 
 def build_vocab(texts, min_freq=VOCAB_MIN_FREQ):
-    """Build word-to-id vocabulary from a list of strings."""
     counter = Counter()
     for text in texts:
         counter.update(simple_tokenize(text))
@@ -211,6 +237,40 @@ def build_vocab(texts, min_freq=VOCAB_MIN_FREQ):
         if freq >= min_freq:
             vocab[word] = len(vocab)
     return vocab
+
+
+# ─────────────────────────────────────────────
+# GLOVE EMBEDDING MATRIX
+# ─────────────────────────────────────────────
+def load_glove():
+    """Download (first run only) and return the gensim GloVe KeyedVectors."""
+    print(f"  Loading GloVe '{GLOVE_MODEL_NAME}' via gensim (~128MB, cached after first run)...")
+    glove = gensim_api.load(GLOVE_MODEL_NAME)
+    print(f"  GloVe loaded: {len(glove)} vectors, {glove.vector_size}d")
+    return glove
+
+
+def build_embedding_matrix(vocab, glove):
+    """
+    Build an embedding matrix of shape (vocab_size, EMBED_DIM).
+    Words found in GloVe use their pretrained vectors.
+    Words not found are initialized with small random uniform values.
+    The PAD token (index 0) is always a zero vector.
+    """
+    vocab_size = len(vocab)
+    # random init for unknown words
+    matrix = np.random.uniform(-0.1, 0.1, (vocab_size, EMBED_DIM)).astype(np.float32)
+    matrix[0] = 0.0   # PAD = zero vector
+
+    found = 0
+    for word, idx in vocab.items():
+        if word in glove:
+            matrix[idx] = glove[word]
+            found += 1
+
+    coverage = 100.0 * found / max(vocab_size, 1)
+    print(f"  GloVe coverage: {found}/{vocab_size} vocab tokens ({coverage:.1f}%)")
+    return torch.tensor(matrix, dtype=torch.float)
 
 
 # ─────────────────────────────────────────────
@@ -232,7 +292,7 @@ class RedditDataset(Dataset):
     def encode(self, text):
         tokens = simple_tokenize(text)[: self.max_len]
         ids    = [self.vocab.get(t, self.unk_id) for t in tokens]
-        length = max(len(ids), 1)   # at least 1 for pack_padded_sequence
+        length = max(len(ids), 1)
         ids    = ids + [self.pad_id] * (self.max_len - len(ids))
         return ids, length
 
@@ -247,80 +307,80 @@ class RedditDataset(Dataset):
 
 
 # ─────────────────────────────────────────────
-# MODEL — BiLSTM  (with optional attention)
+# MODEL — BiLSTM with GloVe init (optional attention)
 # ─────────────────────────────────────────────
 class BiLSTMClassifier(nn.Module):
     """
     2-layer Bidirectional LSTM for text classification.
 
+    Embedding layer is initialized from GloVe pretrained vectors and
+    fine-tuned during training. This provides meaningful starting
+    representations for words, unlike random initialization.
+
     Without attention (Run 1 & 2):
-      The final hidden states of the forward and backward LSTMs are
-      concatenated and fed to a linear classifier.
+      The final hidden states of the top LSTM layer (forward + backward)
+      are concatenated and fed to the classifier.
 
     With attention (Run 3):
-      A learned attention score is computed over every timestep of the
-      LSTM output. The context vector (weighted sum of hidden states)
-      replaces the last-hidden-state pooling, letting the model focus
-      on the most informative words regardless of their position.
+      A learned linear projection computes a scalar score over each
+      timestep's hidden state. A softmax turns scores into weights, and
+      the context vector is the weighted sum of all hidden states.
     """
 
     def __init__(self, vocab_size, embed_dim, hidden_dim, num_layers,
-                 num_classes, dropout, use_attention=False):
+                 num_classes, dropout, pretrained_embeddings=None,
+                 use_attention=False):
         super().__init__()
         self.use_attention = use_attention
 
         self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
-        self.lstm      = nn.LSTM(
-            input_size  = embed_dim,
-            hidden_size = hidden_dim,
-            num_layers  = num_layers,
-            batch_first = True,
+        if pretrained_embeddings is not None:
+            self.embedding.weight = nn.Parameter(pretrained_embeddings)
+            # fine-tune: leave requires_grad=True (default)
+
+        self.lstm = nn.LSTM(
+            input_size    = embed_dim,
+            hidden_size   = hidden_dim,
+            num_layers    = num_layers,
+            batch_first   = True,
             bidirectional = True,
-            dropout     = dropout if num_layers > 1 else 0.0,
+            dropout       = dropout if num_layers > 1 else 0.0,
         )
         self.dropout = nn.Dropout(dropout)
 
-        # attention projection (only used in Run 3)
         if use_attention:
             self.attn_proj = nn.Linear(hidden_dim * 2, 1)
 
         self.classifier = nn.Linear(hidden_dim * 2, num_classes)
 
     def forward(self, input_ids, lengths):
-        # input_ids : (batch, seq_len)
-        # lengths   : (batch,) — actual non-padding length of each sequence
+        x = self.dropout(self.embedding(input_ids))   # (B, T, E)
 
-        x = self.dropout(self.embedding(input_ids))   # (batch, seq_len, embed_dim)
-
-        packed         = nn.utils.rnn.pack_padded_sequence(
+        packed             = nn.utils.rnn.pack_padded_sequence(
             x, lengths.cpu(), batch_first=True, enforce_sorted=False
         )
         output, (hidden, _) = self.lstm(packed)
-        output, _      = nn.utils.rnn.pad_packed_sequence(
+        output, _          = nn.utils.rnn.pad_packed_sequence(
             output, batch_first=True
-        )  # (batch, seq_len, hidden*2)
+        )  # (B, T, H*2)
 
         if self.use_attention:
-            # ── soft attention ──
-            scores  = self.attn_proj(output).squeeze(-1)          # (batch, seq_len)
-            mask    = (input_ids == 0)                            # padding mask
+            scores  = self.attn_proj(output).squeeze(-1)           # (B, T)
+            mask    = (input_ids == 0)
             scores  = scores.masked_fill(mask, -1e9)
-            weights = torch.softmax(scores, dim=-1)               # (batch, seq_len)
-            context = (output * weights.unsqueeze(-1)).sum(dim=1) # (batch, hidden*2)
+            weights = torch.softmax(scores, dim=-1)                # (B, T)
+            context = (output * weights.unsqueeze(-1)).sum(dim=1)  # (B, H*2)
         else:
-            # ── last hidden state of top layer, both directions ──
-            # hidden shape: (num_layers * 2, batch, hidden_dim)
-            forward_h  = hidden[-2]                               # (batch, hidden_dim)
-            backward_h = hidden[-1]                               # (batch, hidden_dim)
-            context    = torch.cat([forward_h, backward_h], dim=-1)  # (batch, hidden*2)
+            forward_h  = hidden[-2]                                # (B, H)
+            backward_h = hidden[-1]                                # (B, H)
+            context    = torch.cat([forward_h, backward_h], dim=-1)  # (B, H*2)
 
         context = self.dropout(context)
-        logits  = self.classifier(context)    # (batch, num_classes)
-        return logits
+        return self.classifier(context)
 
 
 # ─────────────────────────────────────────────
-# LOSS FUNCTIONS
+# LOSS
 # ─────────────────────────────────────────────
 class WeightedCELoss(nn.Module):
     def __init__(self, class_weights):
@@ -404,7 +464,7 @@ def save_all_runs_comparison(all_results):
         for bar, v in zip(bars, vals):
             ax.text(bar.get_x() + bar.get_width() / 2, v + 0.01,
                     f"{v:.3f}", ha="center", va="bottom", fontsize=9)
-    plt.suptitle("BiLSTM — Test Set Comparison Across Runs", fontsize=13, y=1.02)
+    plt.suptitle("BiLSTM + GloVe — Test Set Comparison Across Runs", fontsize=13, y=1.02)
     plt.tight_layout()
     plt.savefig(os.path.join(OUT_DIR, "all_runs_comparison.png"), dpi=150, bbox_inches="tight")
     plt.close()
@@ -412,7 +472,6 @@ def save_all_runs_comparison(all_results):
 
 
 def save_per_class_f1_comparison(all_results, split="test"):
-    """Bar chart of per-class F1 for each run — useful for error analysis in report."""
     run_names = [r["run"] for r in all_results]
     colors    = ["#4e79a7", "#f28e2b", "#e15759"]
     x         = np.arange(len(LABELS))
@@ -429,7 +488,7 @@ def save_per_class_f1_comparison(all_results, split="test"):
     ax.set_xticklabels(LABELS, rotation=30, ha="right")
     ax.set_ylabel("F1 Score")
     ax.set_ylim(0, 1)
-    ax.set_title(f"Per-Class F1 Comparison ({split.title()} Set) — BiLSTM")
+    ax.set_title(f"Per-Class F1 Comparison ({split.title()} Set) — BiLSTM + GloVe")
     ax.legend()
     plt.tight_layout()
     plt.savefig(os.path.join(OUT_DIR, "per_class_f1_comparison.png"), dpi=150)
@@ -495,7 +554,7 @@ def eval_epoch(model, loader, loss_fn):
             total_loss += loss.item()
             all_preds.extend(logits.argmax(dim=-1).cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
-            all_ids.extend(batch["sample_id"])   # original CSV id column
+            all_ids.extend(batch["sample_id"])
 
     avg_loss = total_loss / len(loader)
     metrics  = compute_metrics(
@@ -509,7 +568,7 @@ def eval_epoch(model, loader, loss_fn):
 # MAIN EXPERIMENT RUNNER
 # ─────────────────────────────────────────────
 def run_experiment(run_name, train_df, val_df, test_df, vocab,
-                   use_eda=False, use_attention=False):
+                   embed_matrix, use_eda=False, use_attention=False):
 
     print(f"\n{'='*60}")
     print(f"  RUN      : {run_name}")
@@ -518,16 +577,15 @@ def run_experiment(run_name, train_df, val_df, test_df, vocab,
 
     set_seed()
 
-    # ── augment if needed ──
     train_data = augment_minority_classes(train_df.copy()) if use_eda else train_df.copy()
     print(f"  Train: {len(train_data)}  |  Val: {len(val_df)}  |  Test: {len(test_df)}")
 
-    # ── class weights (computed from training data) ──
+    # class weights from training data
     y_train      = train_data["label"].map(LABEL2ID).values
     cw           = compute_class_weight("balanced", classes=np.arange(NUM_LABELS), y=y_train)
     class_weights = torch.tensor(cw, dtype=torch.float)
 
-    # ── datasets & loaders ──
+    # datasets & loaders
     train_ds = RedditDataset(train_data, vocab)
     val_ds   = RedditDataset(val_df,     vocab)
     test_ds  = RedditDataset(test_df,    vocab)
@@ -536,33 +594,32 @@ def run_experiment(run_name, train_df, val_df, test_df, vocab,
     val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
     test_loader  = DataLoader(test_ds,  batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
 
-    # ── model ──
+    # model — initialize embedding from GloVe matrix
     model = BiLSTMClassifier(
-        vocab_size    = len(vocab),
-        embed_dim     = EMBED_DIM,
-        hidden_dim    = HIDDEN_DIM,
-        num_layers    = NUM_LAYERS,
-        num_classes   = NUM_LABELS,
-        dropout       = DROPOUT,
-        use_attention = use_attention,
+        vocab_size            = len(vocab),
+        embed_dim             = EMBED_DIM,
+        hidden_dim            = HIDDEN_DIM,
+        num_layers            = NUM_LAYERS,
+        num_classes           = NUM_LABELS,
+        dropout               = DROPOUT,
+        pretrained_embeddings = embed_matrix.clone(),  # clone so each run starts fresh
+        use_attention         = use_attention,
     ).to(DEVICE)
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"  Trainable parameters: {total_params:,}")
 
-    # ── loss & optimizer ──
     loss_fn   = WeightedCELoss(class_weights)
     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
 
-    # ── training loop ──
     best_val_f1  = -1
     best_state   = None
     patience_cnt = 0
     train_losses, val_losses = [], []
 
     for epoch in range(1, EPOCHS + 1):
-        tr_loss, tr_met, _, _        = train_epoch(model, train_loader, optimizer, loss_fn)
-        vl_loss, vl_met, _, _, _     = eval_epoch(model, val_loader,   loss_fn)
+        tr_loss, tr_met, _, _    = train_epoch(model, train_loader, optimizer, loss_fn)
+        vl_loss, vl_met, _, _, _ = eval_epoch(model, val_loader,   loss_fn)
 
         train_losses.append(tr_loss)
         val_losses.append(vl_loss)
@@ -581,10 +638,8 @@ def run_experiment(run_name, train_df, val_df, test_df, vocab,
                 print(f"  Early stopping triggered at epoch {epoch}")
                 break
 
-    # ── reload best checkpoint ──
     model.load_state_dict({k: v.to(DEVICE) for k, v in best_state.items()})
 
-    # ── evaluate on all three splits ──
     _, tr_met, tr_lbl, tr_prd, _      = eval_epoch(model, train_loader, loss_fn)
     _, vl_met, vl_lbl, vl_prd, _      = eval_epoch(model, val_loader,   loss_fn)
     _, ts_met, ts_lbl, ts_prd, ts_ids = eval_epoch(model, test_loader,  loss_fn)
@@ -597,15 +652,11 @@ def run_experiment(run_name, train_df, val_df, test_df, vocab,
     print(f"  Val   — Acc {vl_met['accuracy']:.4f}  F1 {vl_met['f1_macro']:.4f}")
     print(f"  Test  — Acc {ts_met['accuracy']:.4f}  F1 {ts_met['f1_macro']:.4f}")
 
-    # ── save all outputs ──
     prefix = os.path.join(OUT_DIR, run_name)
 
-    # loss curves
     save_loss_curves(train_losses, val_losses,
-                     f"{run_name} — Loss Curves",
-                     f"{prefix}_loss_curves.png")
+                     f"{run_name} — Loss Curves", f"{prefix}_loss_curves.png")
 
-    # confusion matrices (train, val, test)
     for split_name, y_t, y_p in [("train", tr_lbl_str, tr_prd_str),
                                   ("val",   vl_lbl_str, vl_prd_str),
                                   ("test",  ts_lbl_str, ts_prd_str)]:
@@ -613,20 +664,17 @@ def run_experiment(run_name, train_df, val_df, test_df, vocab,
                               f"{run_name} — {split_name.title()} Confusion Matrix",
                               f"{prefix}_{split_name}_confusion_matrix.png")
 
-    # classification reports
     for split_name, y_t, y_p in [("val",  vl_lbl_str, vl_prd_str),
                                   ("test", ts_lbl_str, ts_prd_str)]:
         report = classification_report(y_t, y_p, labels=LABELS, zero_division=0)
         with open(f"{prefix}_{split_name}_classification_report.txt", "w") as f:
             f.write(f"Run: {run_name}\nSplit: {split_name}\n\n{report}")
 
-    # metrics JSON
     with open(f"{prefix}_val_metrics.json",  "w") as f:
         json.dump({"run": run_name, **vl_met}, f, indent=2)
     with open(f"{prefix}_test_metrics.json", "w") as f:
         json.dump({"run": run_name, **ts_met}, f, indent=2)
 
-    # misclassified examples (test)
     misclassified = [
         {"id": ts_ids[i], "text": test_df.iloc[i]["text"][:300],
          "true_label": ts_lbl_str[i], "pred_label": ts_prd_str[i]}
@@ -634,7 +682,7 @@ def run_experiment(run_name, train_df, val_df, test_df, vocab,
     ]
     pd.DataFrame(misclassified).to_csv(f"{prefix}_test_misclassified.csv", index=False)
 
-    # ── CodaBench submission CSV (id, label) ──
+    # CodaBench submission (id, label)
     submission_df   = pd.DataFrame({"id": ts_ids, "label": ts_prd_str})
     submission_path = f"{prefix}_submission.csv"
     submission_df.to_csv(submission_path, index=False)
@@ -660,7 +708,6 @@ def run_experiment(run_name, train_df, val_df, test_df, vocab,
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
 
-    # ── load data ──
     print("\nLoading data...")
     train_df = load_split("train.csv")
     val_df   = load_split("validation.csv")
@@ -672,54 +719,61 @@ if __name__ == "__main__":
 
     save_label_distribution(train_df, val_df, test_df)
 
-    # ── build vocabulary from training data only ──
+    # build vocab from training data
     print("\nBuilding vocabulary from training data...")
     vocab = build_vocab(train_df["text"].tolist(), min_freq=VOCAB_MIN_FREQ)
     print(f"  Vocabulary size: {len(vocab):,} tokens  (min_freq={VOCAB_MIN_FREQ})")
 
-    # ── Run 1: BiLSTM base — no augmentation, no attention ────────────────
+    # load GloVe and build embedding matrix (shared across all runs)
+    print("\nPreparing GloVe embedding matrix...")
+    glove      = load_glove()
+    embed_matrix = build_embedding_matrix(vocab, glove)
+    del glove   # free memory after building matrix
+
+    # ── Run 1: BiLSTM + GloVe, no augmentation, no attention ─────────────
     r1 = run_experiment(
         run_name      = "run1_bilstm_base",
         train_df      = train_df,
         val_df        = val_df,
         test_df       = test_df,
         vocab         = vocab,
+        embed_matrix  = embed_matrix,
         use_eda       = False,
         use_attention = False,
     )
 
-    # ── Run 2: BiLSTM + EDA augmentation ──────────────────────────────────
+    # ── Run 2: BiLSTM + GloVe + EDA augmentation ─────────────────────────
     r2 = run_experiment(
         run_name      = "run2_bilstm_eda",
         train_df      = train_df,
         val_df        = val_df,
         test_df       = test_df,
         vocab         = vocab,
+        embed_matrix  = embed_matrix,
         use_eda       = True,
         use_attention = False,
     )
 
-    # ── Run 3: BiLSTM + Attention ──────────────────────────────────────────
+    # ── Run 3: BiLSTM + GloVe + Attention ────────────────────────────────
     r3 = run_experiment(
         run_name      = "run3_bilstm_attention",
         train_df      = train_df,
         val_df        = val_df,
         test_df       = test_df,
         vocab         = vocab,
+        embed_matrix  = embed_matrix,
         use_eda       = False,
         use_attention = True,
     )
 
     all_results = [r1, r2, r3]
 
-    # ── comparison plots ──
     print("\nGenerating comparison plots...")
     save_all_runs_comparison(all_results)
     save_per_class_f1_comparison(all_results, split="test")
     save_summary_csv(all_results, "val")
     save_summary_csv(all_results, "test")
 
-    # ── pick best run by val F1 and create final submission.zip ──
     best = max(all_results, key=lambda r: r["val"]["f1_macro"])
     print(f"\nBest run by val F1: {best['run']}  (val F1 = {best['val']['f1_macro']:.4f})")
 
@@ -728,7 +782,6 @@ if __name__ == "__main__":
         zf.write(best["submission_path"], arcname="submission.csv")
     print(f"  Saved: best_submission.zip  (based on {best['run']})")
 
-    # ── final summary table ──
     print("\n" + "="*65)
     print("  FINAL RESULTS SUMMARY")
     print("="*65)
