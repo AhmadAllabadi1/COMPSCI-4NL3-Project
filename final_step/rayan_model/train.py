@@ -1,16 +1,13 @@
 """
-Rayan Nasrallah -- COMPSCI 4NL3 Final Project
 Model  : BiLSTM with frozen Flair pretrained character-level contextual embeddings
-Task   : 5-class Reddit comment classification
-         (ADVICE, ANECDOTE, APPRAISAL, EMOTIONAL_SUPPORT, WARNING)
 
-Improved version:
-- Uses packed sequences so padding does not corrupt the BiLSTM state
-- Uses true final hidden state from the last BiLSTM layer
-- Uses masked max/mean pooling (ignores padded timesteps)
-- Pre-computes validation/test embeddings once and reuses them across runs
-- Pre-computes train embeddings once per distinct train set (base / EDA)
-- Restores the best checkpoint before final prediction
+3 Runs:
+  Run 1: hidden=512, layers=2, no EDA
+  Run 2: hidden=512, layers=2, + EDA
+  Run 3: hidden=512, layers=3, + EDA
+
+All outputs saved to rayan_model/diagrams/
+
 """
 
 import os
