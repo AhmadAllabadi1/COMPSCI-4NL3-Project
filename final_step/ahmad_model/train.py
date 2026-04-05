@@ -1,25 +1,11 @@
 """
-RoBERTa Fine-Tuning for Reddit Advice Intent Classification
-=============================================================
-Runs three ablation experiments and produces all evaluation outputs:
+RoBERTa fine-tuning for Reddit advice intent classification.
 
-  Run 1: RoBERTa + Weighted Cross-Entropy  (no augmentation)
-  Run 2: RoBERTa + Focal Loss              (no augmentation)
-  Run 3: RoBERTa + Focal Loss              (with targeted EDA augmentation)
-  Run 4: RoBERTa + Weighted Cross-Entropy  (with targeted EDA augmentation)
-
-Two ablation comparisons are generated:
-  - Loss Function:    Weighted CE vs Focal Loss  (Runs 1 vs 2)
-  - Augmentation:     No Aug vs With Aug         (Runs 2 vs 3, Runs 1 vs 4)
-
-All outputs (plots, reports, metrics) are saved to ./diagrams/
-
-Usage:
-    python train.py                 # run all 3 experiments
-    python train.py --run 1         # run only experiment 1
-    python train.py --run 2         # run only experiment 2
-    python train.py --run 3         # run only experiment 3
-    python train.py --run 1 2       # run experiments 1 and 2
+4 ablation runs:
+  1. RoBERTa + Weighted CE (no augmentation)
+  2. RoBERTa + Focal Loss (no augmentation)
+  3. RoBERTa + Focal Loss + EDA augmentation
+  4. RoBERTa + Weighted CE + EDA augmentation
 """
 
 import argparse
@@ -59,9 +45,6 @@ from eda_augment import augment_minority_classes
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# ---------------------------------------------------------------------------
-# Paths & Constants
-# ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR.parent
 DIAGRAM_DIR = BASE_DIR / "diagrams"
@@ -81,7 +64,7 @@ ID2LABEL = {i: label for i, label in enumerate(LABEL_LIST)}
 NUM_LABELS = len(LABEL_LIST)
 
 
-def set_seed(seed: int) -> None:
+def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -89,25 +72,15 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-# ---------------------------------------------------------------------------
-# Focal Loss
-# ---------------------------------------------------------------------------
 class FocalLoss(nn.Module):
-    """
-    Focal Loss (Lin et al., 2017).
+    """Focal Loss - down-weights easy examples so the model focuses on hard ones."""
 
-    FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
-
-    Down-weights easy examples so the model focuses on hard, misclassified ones.
-    gamma=0 reduces to standard cross-entropy.
-    """
-
-    def __init__(self, alpha: torch.Tensor = None, gamma: float = 2.0):
+    def __init__(self, alpha=None, gamma=2.0):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
 
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    def forward(self, logits, targets):
         probs = torch.softmax(logits, dim=-1)
         target_probs = probs.gather(1, targets.unsqueeze(1)).squeeze(1)
         ce_loss = torch.nn.functional.cross_entropy(logits, targets, reduction="none")
@@ -118,13 +91,8 @@ class FocalLoss(nn.Module):
         return (focal_weight * ce_loss).mean()
 
 
-# ---------------------------------------------------------------------------
-# Custom Trainers
-# ---------------------------------------------------------------------------
 class WeightedCETrainer(Trainer):
-    """Trainer with class-weighted cross-entropy loss."""
-
-    def __init__(self, class_weights: torch.Tensor = None, **kwargs):
+    def __init__(self, class_weights=None, **kwargs):
         super().__init__(**kwargs)
         self.class_weights = class_weights
 
@@ -138,9 +106,7 @@ class WeightedCETrainer(Trainer):
 
 
 class FocalTrainer(Trainer):
-    """Trainer with Focal Loss."""
-
-    def __init__(self, focal_loss: FocalLoss = None, **kwargs):
+    def __init__(self, focal_loss=None, **kwargs):
         super().__init__(**kwargs)
         self.focal_loss = focal_loss
 
@@ -152,10 +118,7 @@ class FocalTrainer(Trainer):
         return (loss, outputs) if return_outputs else loss
 
 
-# ---------------------------------------------------------------------------
-# Data helpers
-# ---------------------------------------------------------------------------
-def load_data(path: Path, has_labels: bool = True) -> pd.DataFrame:
+def load_data(path, has_labels=True):
     df = pd.read_csv(path)
     df["text"] = df["text"].astype(str).fillna("")
     if has_labels:
@@ -163,7 +126,7 @@ def load_data(path: Path, has_labels: bool = True) -> pd.DataFrame:
     return df
 
 
-def df_to_dataset(df: pd.DataFrame, tokenizer, has_labels: bool = True) -> Dataset:
+def df_to_dataset(df, tokenizer, has_labels=True):
     data_dict = {"text": df["text"].tolist()}
     if has_labels:
         data_dict["label"] = [LABEL2ID[l] for l in df["label"]]
@@ -176,8 +139,8 @@ def df_to_dataset(df: pd.DataFrame, tokenizer, has_labels: bool = True) -> Datas
     return dataset
 
 
-def compute_class_weights(labels: list) -> torch.Tensor:
-    """Inverse-frequency weights: total / (num_classes * count_per_class)."""
+def compute_class_weights(labels):
+    """Inverse-frequency weights."""
     counts = Counter(labels)
     total = sum(counts.values())
     n = len(counts)
@@ -199,9 +162,8 @@ def compute_eval_metrics(eval_pred):
     }
 
 
-# ---------------------------------------------------------------------------
-# Visualization
-# ---------------------------------------------------------------------------
+# Plotting helpers
+
 def plot_label_distribution(train_df, val_df, test_df, save_dir):
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     for ax, (name, df) in zip(axes, [("Train", train_df), ("Validation", val_df), ("Test", test_df)]):
@@ -277,7 +239,6 @@ def save_misclassified(texts, y_true, y_pred, save_path, max_samples=50):
 
 
 def plot_ablation(metrics_a, metrics_b, label_a, label_b, title, save_path):
-    """Side-by-side bar chart comparing two runs."""
     names = ["accuracy", "f1_macro", "f1_weighted", "precision_macro", "recall_macro"]
     vals_a = [metrics_a[m] for m in names]
     vals_b = [metrics_b[m] for m in names]
@@ -302,7 +263,6 @@ def plot_ablation(metrics_a, metrics_b, label_a, label_b, title, save_path):
 
 
 def plot_all_runs_comparison(all_results, save_path):
-    """Grouped bar chart comparing all 3 runs across all metrics."""
     names = ["accuracy", "f1_macro", "f1_weighted", "precision_macro", "recall_macro"]
     display = [m.replace("_", " ").title() for m in names]
     run_labels = list(all_results.keys())
@@ -332,7 +292,6 @@ def plot_all_runs_comparison(all_results, save_path):
 
 
 def plot_per_class_f1_comparison(all_results, save_path):
-    """Grouped bar chart comparing per-class F1 across all runs."""
     run_labels = list(all_results.keys())
     colors = ["#4C72B0", "#DD8452", "#55A868", "#C44E52"]
 
@@ -363,23 +322,11 @@ def plot_per_class_f1_comparison(all_results, save_path):
     print(f"  Saved: {save_path}")
 
 
-# ---------------------------------------------------------------------------
 # Training
-# ---------------------------------------------------------------------------
-def run_experiment(
-    run_tag: str,
-    train_dataset: Dataset,
-    val_dataset: Dataset,
-    val_texts: list,
-    test_dataset: Dataset,
-    test_texts: list,
-    trainer_cls,
-    trainer_extra_kwargs: dict,
-    num_epochs: int = 4,
-    learning_rate: float = 2e-5,
-    batch_size: int = 8,
-) -> dict:
-    """Run one training experiment and save all outputs."""
+
+def run_experiment(run_tag, train_dataset, val_dataset, val_texts,
+                   test_dataset, test_texts, trainer_cls, trainer_extra_kwargs,
+                   num_epochs=4, learning_rate=2e-5, batch_size=8):
 
     print(f"\n{'='*60}")
     print(f"  Run: {run_tag}")
@@ -388,7 +335,6 @@ def run_experiment(
     print(f"  Epochs: {num_epochs}, LR: {learning_rate}, Batch: {batch_size}")
     print(f"{'='*60}\n")
 
-    # Fresh model each run
     model = AutoModelForSequenceClassification.from_pretrained(
         MODEL_NAME,
         num_labels=NUM_LABELS,
@@ -431,21 +377,18 @@ def run_experiment(
 
     trainer.train()
 
-    # Evaluate
     eval_results = trainer.evaluate()
     print(f"\n  Results for {run_tag}:")
     for k, v in eval_results.items():
         print(f"    {k}: {v:.4f}" if isinstance(v, float) else f"    {k}: {v}")
 
-    # Predictions
+    # val predictions
     predictions = trainer.predict(val_dataset)
     pred_ids = np.argmax(predictions.predictions, axis=-1)
     true_ids = np.array(val_dataset["label"])
 
-    # File prefix for this run
     prefix = run_tag.lower().replace(" ", "_").replace("+", "").replace("  ", "_")
 
-    # Save all per-run outputs
     plot_confusion_matrix(true_ids, pred_ids,
                           DIAGRAM_DIR / f"{prefix}_confusion_matrix.png",
                           f"Confusion Matrix — {run_tag}")
@@ -472,7 +415,7 @@ def run_experiment(
     val_metrics_path.write_text(json.dumps(val_metrics, indent=2), encoding="utf-8")
     print(f"  Saved: {val_metrics_path}")
 
-    # --- Test set evaluation (final results) ---
+    # test predictions
     print(f"\n  Evaluating on TEST set...")
     test_predictions = trainer.predict(test_dataset)
     test_pred_ids = np.argmax(test_predictions.predictions, axis=-1)
@@ -500,7 +443,6 @@ def run_experiment(
     test_metrics_path.write_text(json.dumps(test_metrics, indent=2), encoding="utf-8")
     print(f"  Saved: {test_metrics_path}")
 
-    # Save best model
     trainer.save_model(str(output_dir / "best_model"))
     print(f"  Model saved to: {output_dir / 'best_model'}")
 
@@ -514,27 +456,22 @@ def run_experiment(
     }
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="RoBERTa ablation study for advice intent classification")
+    parser = argparse.ArgumentParser()
     parser.add_argument("--run", type=int, nargs="*", default=None,
                         help="Which runs to execute (1, 2, 3, 4). Default: all.")
-    parser.add_argument("--eda-alpha", type=float, default=0.1, help="EDA intensity (default: 0.1)")
-    parser.add_argument("--epochs", type=int, default=4, help="Training epochs (default: 4)")
-    parser.add_argument("--lr", type=float, default=2e-5, help="Learning rate (default: 2e-5)")
-    parser.add_argument("--batch-size", type=int, default=8, help="Batch size (default: 8)")
-    parser.add_argument("--gamma", type=float, default=2.0, help="Focal loss gamma (default: 2.0)")
+    parser.add_argument("--eda-alpha", type=float, default=0.1)
+    parser.add_argument("--epochs", type=int, default=4)
+    parser.add_argument("--lr", type=float, default=2e-5)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--gamma", type=float, default=2.0)
     args = parser.parse_args()
 
     runs_to_do = set(args.run) if args.run else {1, 2, 3, 4}
 
     set_seed(SEED)
 
-    # ------------------------------------------------------------------
     # Load data
-    # ------------------------------------------------------------------
     print("=" * 60)
     print("  Loading data")
     print("=" * 60)
@@ -543,32 +480,25 @@ def main():
     test_df = load_data(TEST_CSV, has_labels=True)
     print(f"  Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
 
-    # Label distributions
     plot_label_distribution(train_df, val_df, test_df, DIAGRAM_DIR)
 
-    # Tokenizer
     print("\nLoading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
-    # Shared validation and test sets
     val_dataset = df_to_dataset(val_df, tokenizer, has_labels=True)
     val_texts = val_df["text"].tolist()
     test_dataset = df_to_dataset(test_df, tokenizer, has_labels=True)
     test_texts = test_df["text"].tolist()
 
-    # Class weights
     train_label_ids = [LABEL2ID[l] for l in train_df["label"]]
     class_weights = compute_class_weights(train_label_ids)
     print(f"\n  Class weights: { {LABEL_LIST[i]: round(w, 3) for i, w in enumerate(class_weights.tolist())} }")
 
-    # Tokenize original training set (shared by runs 1 & 2)
     train_dataset = df_to_dataset(train_df, tokenizer, has_labels=True)
 
     all_results = {}
 
-    # ------------------------------------------------------------------
-    # Run 1: RoBERTa + Weighted CE (no augmentation)
-    # ------------------------------------------------------------------
+    # Run 1: Weighted CE, no augmentation
     if 1 in runs_to_do:
         all_results["Weighted CE"] = run_experiment(
             run_tag="Weighted CE",
@@ -584,9 +514,7 @@ def main():
             batch_size=args.batch_size,
         )
 
-    # ------------------------------------------------------------------
-    # Run 2: RoBERTa + Focal Loss (no augmentation)
-    # ------------------------------------------------------------------
+    # Run 2: Focal Loss, no augmentation
     if 2 in runs_to_do:
         focal = FocalLoss(alpha=class_weights, gamma=args.gamma)
         all_results["Focal Loss"] = run_experiment(
@@ -603,11 +531,9 @@ def main():
             batch_size=args.batch_size,
         )
 
-    # ------------------------------------------------------------------
-    # Run 3: RoBERTa + Focal Loss + Targeted EDA (with augmentation)
-    # ------------------------------------------------------------------
+    # Run 3: Focal Loss + EDA
     if 3 in runs_to_do:
-        print(f"\nApplying targeted EDA augmentation (minority → majority count, alpha={args.eda_alpha})...")
+        print(f"\nApplying EDA augmentation (alpha={args.eda_alpha})...")
         aug_texts, aug_labels = augment_minority_classes(
             train_df["text"].tolist(),
             train_df["label"].tolist(),
@@ -641,13 +567,10 @@ def main():
             batch_size=args.batch_size,
         )
 
-    # ------------------------------------------------------------------
-    # Run 4: RoBERTa + Weighted CE + Targeted EDA (with augmentation)
-    # ------------------------------------------------------------------
+    # Run 4: Weighted CE + EDA
     if 4 in runs_to_do:
-        # Reuse augmented data from Run 3 if available, otherwise generate it
         if "aug_dataset" not in locals():
-            print(f"\nApplying targeted EDA augmentation (minority → majority count, alpha={args.eda_alpha})...")
+            print(f"\nApplying EDA augmentation (alpha={args.eda_alpha})...")
             aug_texts, aug_labels = augment_minority_classes(
                 train_df["text"].tolist(),
                 train_df["label"].tolist(),
@@ -680,11 +603,7 @@ def main():
             batch_size=args.batch_size,
         )
 
-    # ------------------------------------------------------------------
     # Ablation comparisons
-    # ------------------------------------------------------------------
-
-    # Loss function ablation (no augmentation): Weighted CE vs Focal Loss
     if "Weighted CE" in all_results and "Focal Loss" in all_results:
         print("\n  Generating loss function ablation...")
         plot_ablation(
@@ -695,7 +614,6 @@ def main():
             DIAGRAM_DIR / "ablation_loss_function.png",
         )
 
-    # Augmentation ablation (Focal Loss): No Aug vs EDA
     if "Focal Loss" in all_results and "Focal Loss + EDA" in all_results:
         print("\n  Generating Focal Loss augmentation ablation...")
         plot_ablation(
@@ -706,7 +624,6 @@ def main():
             DIAGRAM_DIR / "ablation_augmentation_focal.png",
         )
 
-    # Augmentation ablation (Weighted CE): No Aug vs EDA
     if "Weighted CE" in all_results and "Weighted CE + EDA" in all_results:
         print("\n  Generating Weighted CE augmentation ablation...")
         plot_ablation(
@@ -717,11 +634,8 @@ def main():
             DIAGRAM_DIR / "ablation_augmentation_wce.png",
         )
 
-    # ------------------------------------------------------------------
-    # Overall comparison (all runs) — using TEST metrics
-    # ------------------------------------------------------------------
+    # Overall comparison
     if len(all_results) >= 2:
-        # Temporarily swap in test_metrics for the comparison plots
         test_results = {k: {"metrics": v["test_metrics"],
                             "predictions": v["test_predictions"],
                             "true_labels": v["test_true_labels"]}
@@ -729,11 +643,8 @@ def main():
         plot_all_runs_comparison(test_results, DIAGRAM_DIR / "all_runs_comparison.png")
         plot_per_class_f1_comparison(test_results, DIAGRAM_DIR / "per_class_f1_comparison.png")
 
-    # ------------------------------------------------------------------
-    # Summary tables (both val and test)
-    # ------------------------------------------------------------------
+    # Summary tables
     if all_results:
-        # Validation summary
         val_rows = []
         for label, res in all_results.items():
             row = {"Run": label}
@@ -746,7 +657,6 @@ def main():
         print("\n  Validation Summary:")
         print("  " + val_summary.to_string(index=False).replace("\n", "\n  "))
 
-        # Test summary (FINAL RESULTS)
         test_rows = []
         for label, res in all_results.items():
             row = {"Run": label}
@@ -760,7 +670,7 @@ def main():
         print("  " + test_summary.to_string(index=False).replace("\n", "\n  "))
 
     print("\n" + "=" * 60)
-    print("  All done! Check diagrams/ for all outputs.")
+    print("  All done! Check diagrams/ for outputs.")
     print("=" * 60)
 
 

@@ -1,12 +1,6 @@
 """
-Generate CodaBench submission for Run 1: RoBERTa + Weighted Cross-Entropy (no EDA).
-
-Usage:
-    python make_submission.py                   # train from scratch
-    python make_submission.py --model-dir ./run_weighted_ce/best_model  # load saved model
-
-Output: submission.zip containing submission.csv with columns: id, label
-Labels are mapped to CodaBench format: Advice, Anecdote, Appraisal, Emotional Support, Warning
+Generate CodaBench submission for Run 1 (RoBERTa + Weighted CE, no EDA).
+Outputs submission.zip with columns: id, label
 """
 
 import argparse
@@ -32,9 +26,6 @@ import pandas as pd
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# ---------------------------------------------------------------------------
-# Paths & Constants
-# ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR.parent
 
@@ -46,23 +37,21 @@ MODEL_NAME = "roberta-base"
 MAX_LEN    = 512
 SEED       = 42
 
-# Internal labels (uppercase)
 LABEL_LIST = ["ADVICE", "ANECDOTE", "APPRAISAL", "EMOTIONAL_SUPPORT", "WARNING"]
 LABEL2ID   = {label: i for i, label in enumerate(LABEL_LIST)}
 ID2LABEL   = {i: label for i, label in enumerate(LABEL_LIST)}
 NUM_LABELS = len(LABEL_LIST)
 
-# CodaBench-format label mapping
 CODABENCH_LABEL = {
-    "ADVICE":            "Advice",
-    "ANECDOTE":          "Anecdote",
-    "APPRAISAL":         "Appraisal",
-    "EMOTIONAL_SUPPORT": "Emotional Support",
-    "WARNING":           "Warning",
+    "ADVICE":            "ADVICE",
+    "ANECDOTE":          "ANECDOTE",
+    "APPRAISAL":         "APPRAISAL",
+    "EMOTIONAL_SUPPORT": "EMOTIONAL_SUPPORT",
+    "WARNING":           "WARNING",
 }
 
 
-def set_seed(seed: int) -> None:
+def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -70,11 +59,8 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-# ---------------------------------------------------------------------------
-# Weighted CE trainer
-# ---------------------------------------------------------------------------
 class WeightedCETrainer(Trainer):
-    def __init__(self, class_weights: torch.Tensor = None, **kwargs):
+    def __init__(self, class_weights=None, **kwargs):
         super().__init__(**kwargs)
         self.class_weights = class_weights
 
@@ -87,10 +73,7 @@ class WeightedCETrainer(Trainer):
         return (loss, outputs) if return_outputs else loss
 
 
-# ---------------------------------------------------------------------------
-# Data helpers
-# ---------------------------------------------------------------------------
-def load_data(path: Path, has_labels: bool = True) -> pd.DataFrame:
+def load_data(path, has_labels=True):
     df = pd.read_csv(path, encoding="utf-8")
     df["text"] = df["text"].astype(str).fillna("")
     if has_labels:
@@ -98,7 +81,7 @@ def load_data(path: Path, has_labels: bool = True) -> pd.DataFrame:
     return df
 
 
-def df_to_dataset(df: pd.DataFrame, tokenizer, has_labels: bool = True) -> Dataset:
+def df_to_dataset(df, tokenizer, has_labels=True):
     data_dict = {"text": df["text"].tolist()}
     if has_labels:
         data_dict["label"] = [LABEL2ID[l] for l in df["label"]]
@@ -111,7 +94,7 @@ def df_to_dataset(df: pd.DataFrame, tokenizer, has_labels: bool = True) -> Datas
     return dataset
 
 
-def compute_class_weights(labels: list) -> torch.Tensor:
+def compute_class_weights(labels):
     counts = Counter(labels)
     total = sum(counts.values())
     n = len(counts)
@@ -133,13 +116,10 @@ def compute_eval_metrics(eval_pred):
     }
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-dir", type=str, default=None,
-                        help="Path to a saved best_model directory (skips training)")
+                        help="Path to saved best_model dir (skips training)")
     parser.add_argument("--epochs",     type=int,   default=4)
     parser.add_argument("--lr",         type=float, default=2e-5)
     parser.add_argument("--batch-size", type=int,   default=8)
@@ -150,7 +130,7 @@ def main():
     print("Loading data...")
     train_df = load_data(TRAIN_CSV, has_labels=True)
     val_df   = load_data(VAL_CSV,   has_labels=True)
-    test_df  = load_data(TEST_CSV,  has_labels=False)   # no labels needed for submission
+    test_df  = load_data(TEST_CSV,  has_labels=False)
     print(f"  Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
 
     test_ids = test_df["id"].tolist()
@@ -161,9 +141,6 @@ def main():
     val_dataset  = df_to_dataset(val_df,  tokenizer, has_labels=True)
     test_dataset = df_to_dataset(test_df, tokenizer, has_labels=False)
 
-    # -----------------------------------------------------------------------
-    # Load or train model
-    # -----------------------------------------------------------------------
     if args.model_dir and Path(args.model_dir).exists():
         print(f"Loading saved model from {args.model_dir}...")
         model = AutoModelForSequenceClassification.from_pretrained(
@@ -172,7 +149,6 @@ def main():
             id2label=ID2LABEL,
             label2id=LABEL2ID,
         )
-        # Need a trainer just for predict()
         training_args = TrainingArguments(
             output_dir=str(BASE_DIR / "tmp_predict"),
             per_device_eval_batch_size=16,
@@ -184,7 +160,7 @@ def main():
             compute_metrics=compute_eval_metrics,
         )
     else:
-        print("Training Run 1: RoBERTa + Weighted CE (no EDA)...")
+        print("Training: RoBERTa + Weighted CE (no EDA)...")
         train_label_ids = [LABEL2ID[l] for l in train_df["label"]]
         class_weights   = compute_class_weights(train_label_ids)
         print(f"  Class weights: { {LABEL_LIST[i]: round(w, 3) for i, w in enumerate(class_weights.tolist())} }")
@@ -232,7 +208,6 @@ def main():
 
         trainer.train()
 
-        # Save best model for future use
         trainer.save_model(str(output_dir / "best_model"))
         print(f"  Model saved to: {output_dir / 'best_model'}")
 
@@ -242,19 +217,14 @@ def main():
             if isinstance(v, float):
                 print(f"  {k}: {v:.4f}")
 
-    # -----------------------------------------------------------------------
-    # Generate predictions on test set
-    # -----------------------------------------------------------------------
+    # Generate test predictions
     print("\nGenerating test predictions...")
     test_predictions = trainer.predict(test_dataset)
     test_pred_ids    = np.argmax(test_predictions.predictions, axis=-1)
 
-    # Map to CodaBench labels
     pred_labels = [CODABENCH_LABEL[ID2LABEL[i]] for i in test_pred_ids]
 
-    # -----------------------------------------------------------------------
     # Save submission
-    # -----------------------------------------------------------------------
     submission_df = pd.DataFrame({"id": test_ids, "label": pred_labels})
     csv_path = BASE_DIR / "submission.csv"
     zip_path = BASE_DIR / "submission.zip"
