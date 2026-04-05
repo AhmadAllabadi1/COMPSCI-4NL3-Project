@@ -52,13 +52,13 @@ LABEL2ID   = {label: i for i, label in enumerate(LABEL_LIST)}
 ID2LABEL   = {i: label for i, label in enumerate(LABEL_LIST)}
 NUM_LABELS = len(LABEL_LIST)
 
-# CodaBench-format label mapping
+# CodaBench-format label mapping (uppercase with underscores)
 CODABENCH_LABEL = {
-    "ADVICE":            "Advice",
-    "ANECDOTE":          "Anecdote",
-    "APPRAISAL":         "Appraisal",
-    "EMOTIONAL_SUPPORT": "Emotional Support",
-    "WARNING":           "Warning",
+    "ADVICE":            "ADVICE",
+    "ANECDOTE":          "ANECDOTE",
+    "APPRAISAL":         "APPRAISAL",
+    "EMOTIONAL_SUPPORT": "EMOTIONAL_SUPPORT",
+    "WARNING":           "WARNING",
 }
 
 
