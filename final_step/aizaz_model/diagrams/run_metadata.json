@@ -1,0 +1,13 @@
+{
+  "seed": 42,
+  "vocab_size": 3800,
+  "max_length": 179,
+  "embed_dim": 200,
+  "class_weights": {
+    "ADVICE": 0.47863247990608215,
+    "ANECDOTE": 0.8860759735107422,
+    "APPRAISAL": 0.8092485666275024,
+    "EMOTIONAL_SUPPORT": 4.307692527770996,
+    "WARNING": 3.1818182468414307
+  }
+}

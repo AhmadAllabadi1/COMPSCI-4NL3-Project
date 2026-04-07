@@ -1,0 +1,98 @@
+{
+  "run": "textcnn_random_weighted",
+  "best_epoch": 9,
+  "loss": 1.5843878841400147,
+  "accuracy": 0.53,
+  "f1_macro": 0.37712028721000557,
+  "f1_weighted": 0.5122828734657953,
+  "precision_macro": 0.3806463326071169,
+  "recall_macro": 0.38124188053599817,
+  "per_class": {
+    "ADVICE": {
+      "precision": 0.6296296296296297,
+      "recall": 0.68,
+      "f1": 0.6538461538461539,
+      "support": 125
+    },
+    "ANECDOTE": {
+      "precision": 0.5432098765432098,
+      "recall": 0.6470588235294118,
+      "f1": 0.5906040268456376,
+      "support": 68
+    },
+    "APPRAISAL": {
+      "precision": 0.39705882352941174,
+      "recall": 0.36486486486486486,
+      "f1": 0.38028169014084506,
+      "support": 74
+    },
+    "EMOTIONAL_SUPPORT": {
+      "precision": 0.3333333333333333,
+      "recall": 0.21428571428571427,
+      "f1": 0.2608695652173913,
+      "support": 14
+    },
+    "WARNING": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "support": 19
+    }
+  },
+  "classification_report": {
+    "ADVICE": {
+      "precision": 0.6296296296296297,
+      "recall": 0.68,
+      "f1-score": 0.6538461538461539,
+      "support": 125.0
+    },
+    "ANECDOTE": {
+      "precision": 0.5432098765432098,
+      "recall": 0.6470588235294118,
+      "f1-score": 0.5906040268456376,
+      "support": 68.0
+    },
+    "APPRAISAL": {
+      "precision": 0.39705882352941174,
+      "recall": 0.36486486486486486,
+      "f1-score": 0.38028169014084506,
+      "support": 74.0
+    },
+    "EMOTIONAL_SUPPORT": {
+      "precision": 0.3333333333333333,
+      "recall": 0.21428571428571427,
+      "f1-score": 0.2608695652173913,
+      "support": 14.0
+    },
+    "WARNING": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 19.0
+    },
+    "accuracy": 0.53,
+    "macro avg": {
+      "precision": 0.3806463326071169,
+      "recall": 0.38124188053599817,
+      "f1-score": 0.37712028721000557,
+      "support": 300.0
+    },
+    "weighted avg": {
+      "precision": 0.49896998305495033,
+      "recall": 0.53,
+      "f1-score": 0.5122828734657953,
+      "support": 300.0
+    }
+  },
+  "seed": 42,
+  "vocab_size": 3800,
+  "max_length": 179,
+  "embed_dim": 200,
+  "class_weights": {
+    "ADVICE": 0.47863247990608215,
+    "ANECDOTE": 0.8860759735107422,
+    "APPRAISAL": 0.8092485666275024,
+    "EMOTIONAL_SUPPORT": 4.307692527770996,
+    "WARNING": 3.1818182468414307
+  }
+}

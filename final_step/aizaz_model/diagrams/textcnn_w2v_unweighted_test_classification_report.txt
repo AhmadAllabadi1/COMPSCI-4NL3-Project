@@ -1,0 +1,11 @@
+ADVICE                precision=0.6424  recall=0.7698  f1=0.7004  support=126
+ANECDOTE              precision=0.5172  recall=0.6716  f1=0.5844  support=67
+APPRAISAL             precision=0.5246  recall=0.4324  f1=0.4741  support=74
+EMOTIONAL_SUPPORT     precision=1.0000  recall=0.0714  f1=0.1333  support=14
+WARNING               precision=0.0000  recall=0.0000  f1=0.0000  support=19
+
+accuracy     = 0.5833
+macro_f1     = 0.3784
+weighted_f1  = 0.5478
+macro_prec   = 0.5368
+macro_recall = 0.3891
